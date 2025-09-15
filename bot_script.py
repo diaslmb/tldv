@@ -7,6 +7,7 @@ import asyncio
 import subprocess
 import requests
 from playwright.async_api import async_playwright, TimeoutError
+from process_transcript import parse_transcript
 
 # --- CONFIGURATION ---
 MEETING_URL = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -158,27 +159,12 @@ def align_transcript_with_speakers(transcript, speaker_log):
 
 
 def transcribe_audio(filename):
-    """Send audio to Whisper STT service and parse into structured segments."""
     print("Sending audio to Whisper service...")
     with open(filename, "rb") as f:
         resp = requests.post(WHISPER_API_URL, files={"file": f})
     resp.raise_for_status()
-    stt_output = resp.json()  # {"text": "..."}
-    raw_text = stt_output["text"]
-
-    # Regex to extract [SPEAKER_X] [start - end] text
-    pattern = re.compile(r"\[(SPEAKER_\d+)\]\s*\[(\d+\.\d+)\s*-\s*(\d+\.\d+)\]\s*(.+?)(?=\n?\[SPEAKER_|\Z)", re.DOTALL)
-
-    transcript = []
-    for match in pattern.finditer(raw_text.replace("<br>", "\n")):
-        spk_id, start, end, seg_text = match.groups()
-        transcript.append({
-            "speaker_id": spk_id,
-            "start": float(start),
-            "end": float(end),
-            "text": seg_text.strip()
-        })
-    return transcript
+    raw_text = resp.json()["text"]
+    return parse_transcript(raw_text)
 
 
 if __name__ == "__main__":
