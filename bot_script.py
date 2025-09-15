@@ -142,12 +142,11 @@ async def join_and_record_meeting(url: str, max_duration: int):
 
 
 def align_transcript_with_speakers(transcript, speaker_log):
-    """Assigns speakers to Whisper transcription segments."""
+    """Replace diarization speaker IDs with closest real Google Meet speaker name."""
     result = []
     for seg in transcript:
         seg_start = seg["start"]
-        # find nearest speaker timestamp
-        closest = min(speaker_log, key=lambda s: abs(s["time"] - seg_start)) if speaker_log else {"speaker": "Unknown"}
+        closest = min(speaker_log, key=lambda s: abs(s["time"] - seg_start)) if speaker_log else {"speaker": seg["speaker_id"]}
         result.append({
             "speaker": closest["speaker"],
             "start": seg["start"],
@@ -157,13 +156,29 @@ def align_transcript_with_speakers(transcript, speaker_log):
     return result
 
 
+
 def transcribe_audio(filename):
-    """Send audio to Whisper STT service."""
+    """Send audio to Whisper STT service and parse into structured segments."""
     print("Sending audio to Whisper service...")
     with open(filename, "rb") as f:
         resp = requests.post(WHISPER_API_URL, files={"file": f})
     resp.raise_for_status()
-    return resp.json()  # expected: list of {"start","end","text"}
+    stt_output = resp.json()  # {"text": "..."}
+    raw_text = stt_output["text"]
+
+    # Regex to extract [SPEAKER_X] [start - end] text
+    pattern = re.compile(r"\[(SPEAKER_\d+)\]\s*\[(\d+\.\d+)\s*-\s*(\d+\.\d+)\]\s*(.+?)(?=\n?\[SPEAKER_|\Z)", re.DOTALL)
+
+    transcript = []
+    for match in pattern.finditer(raw_text.replace("<br>", "\n")):
+        spk_id, start, end, seg_text = match.groups()
+        transcript.append({
+            "speaker_id": spk_id,
+            "start": float(start),
+            "end": float(end),
+            "text": seg_text.strip()
+        })
+    return transcript
 
 
 if __name__ == "__main__":
