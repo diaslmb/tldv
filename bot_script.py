@@ -5,66 +5,62 @@ import subprocess
 from playwright.async_api import async_playwright
 
 # --- CONFIGURATION ---
-# The URL will be passed in when the script is called
-MEETING_URL = sys.argv[1] if len(sys.argv) > 1 else "https://meet.google.com/ruc-cqzz-ekr"
-# How long to record for (in seconds)
+# The script reads the meeting URL from the command line argument.
+# Example: python bot_script.py "https://meet.google.com/ruc-cqzz-ekr"
+MEETING_URL = sys.argv[1] if len(sys.argv) > 1 else ""
+
+# How long to record for (in seconds). 300 seconds = 5 minutes.
 MEETING_DURATION_SECONDS = 300 
 OUTPUT_FILENAME = "meeting_audio.wav"
 
-# --- FFMPEG COMMANDS PER OS ---
 def get_ffmpeg_command(platform):
+    """Returns the appropriate ffmpeg command based on the operating system."""
     if platform.startswith("linux"):
-        # Records from the default pulse audio output sink
+        # Records from the default pulse audio output in a Linux environment.
         return [
             "ffmpeg", "-y", "-f", "pulse", "-i", "default",
             "-t", str(MEETING_DURATION_SECONDS), OUTPUT_FILENAME
         ]
     elif platform == "darwin": # macOS
-        # Records from the "BlackHole 2ch" virtual audio device
+        # Records from the "BlackHole 2ch" virtual audio device on macOS.
         return [
             "ffmpeg", "-y", "-f", "avfoundation", "-i", ":BlackHole 2ch",
             "-t", str(MEETING_DURATION_SECONDS), OUTPUT_FILENAME
         ]
-    else: # Windows
-        # This is more complex. You need to find your "Stereo Mix" device name.
-        # Open Sound settings, find the device name and replace "Stereo Mix".
-        # You may need to enable it first.
-        print("WARNING: Windows audio capture requires manual setup.")
-        return [
-            "ffmpeg", "-y", "-f", "dshow", "-i", "audio=Stereo Mix (Realtek(R) Audio)",
-            "-t", str(MEETING_DURATION_SECONDS), OUTPUT_FILENAME
-        ]
+    # Add other OS configurations here if needed (e.g., Windows).
+    return None
 
 async def join_and_record_meeting(url: str, duration: int):
+    """Launches a browser, joins a meeting, and records the audio."""
     ffmpeg_command = get_ffmpeg_command(sys.platform)
     if not ffmpeg_command:
-        print(f"Unsupported OS: {sys.platform}")
+        print(f"Unsupported OS: {sys.platform}. Could not determine ffmpeg command.")
         return
 
     print("Starting browser...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=False, # Must be False if not using a virtual display like Xvfb
+            headless=False, # Must be False to work inside a virtual display like Xvfb.
             args=[
                 "--disable-blink-features=AutomationControlled",
-                "--use-fake-ui-for-media-stream",
+                "--use-fake-ui-for-media-stream",   # Auto-grant camera/mic permissions.
                 "--use-fake-device-for-media-stream",
             ]
         )
         context = await browser.new_context(permissions=["microphone", "camera"])
         page = await context.new_page()
 
+        recorder = None # Initialize recorder to None
         try:
             print(f"Navigating to {url}...")
-            await page.goto(url)
+            # Use a longer timeout for page navigation to handle slower connections.
+            await page.goto(url, timeout=60000) 
 
-            # IMPORTANT: Before running, manually set your Mac's sound output to "BlackHole 2ch"
-            # in System Settings -> Sound -> Output.
-            if sys.platform == "darwin":
-                print("\n!!! ACTION REQUIRED FOR MACOS !!!")
-                input("Please set your system's sound output to 'BlackHole 2ch' and press Enter...")
-
+            # This is the selector that failed before. We keep it to see why it failed.
+            # The screenshot will tell us if the text should be "Ask to join" or something else.
             join_button_selector = 'button:has-text("Join now")'
+            
+            print(f"Waiting for selector: '{join_button_selector}'")
             await page.wait_for_selector(join_button_selector, timeout=30000)
             
             print(f"Starting recording... Command: {' '.join(ffmpeg_command)}")
@@ -78,23 +74,28 @@ async def join_and_record_meeting(url: str, duration: int):
 
         except Exception as e:
             print(f"An error occurred: {e}")
+            # Take a screenshot to help debug what the browser sees.
+            await page.screenshot(path="debug_screenshot.png")
+            print("📸 Screenshot saved to debug_screenshot.png. Please check this file.")
+            
         finally:
-            print("Meeting duration ended. Stopping recording and closing browser.")
-            if 'recorder' in locals() and recorder.poll() is None:
+            print("Cleaning up...")
+            if recorder and recorder.poll() is None:
                 recorder.terminate()
                 stdout, stderr = recorder.communicate()
-                print("Recording stopped.")
+                print("Recording process terminated.")
                 if os.path.exists(OUTPUT_FILENAME):
                     print(f"✅ Audio saved to {OUTPUT_FILENAME}")
-                    # NEXT STEP: Upload OUTPUT_FILENAME to your Phase 1 API here.
                 else:
-                    print("❌ Recording failed. FFmpeg output:")
+                    print("❌ Recording failed. FFmpeg error output:")
                     print(stderr.decode())
             await browser.close()
+            print("Browser closed.")
 
 if __name__ == "__main__":
-    if "your-test-code" in MEETING_URL:
-        print("Error: Please provide a valid meeting URL as a command-line argument.")
+    if not MEETING_URL:
+        print("Error: Please provide a meeting URL as a command-line argument.")
+        print('Example: python bot_script.py "https://meet.google.com/abc-defg-hij"')
         sys.exit(1)
     
     asyncio.run(join_and_record_meeting(MEETING_URL, MEETING_DURATION_SECONDS))
