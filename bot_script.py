@@ -48,27 +48,26 @@ async def join_and_record_meeting(url: str, duration: int):
             print(f"Navigating to {url}...")
             await page.goto(url, timeout=60000)
 
-            # =========================================================
-            # ===> STEP 1: FILL IN THE NAME <===
             name_input_selector = 'input[placeholder="Your name"]'
             print("Waiting for the name input field...")
             await page.wait_for_selector(name_input_selector, timeout=15000)
             print("Entering a name...")
             await page.locator(name_input_selector).fill("NoteTaker Bot")
-            # =========================================================
 
-            # ===> STEP 2: CLICK THE "JOIN NOW" BUTTON <===
-            join_button_selector = 'button:has-text("Join now")'
-            print("Waiting for the 'Join now' button to be enabled...")
+            # =========================================================
+            # ===> THE ONLY CHANGE IS ON THIS LINE <===
+            join_button_selector = 'button:has-text("Ask to join")'
+            # =========================================================
+            
+            print(f"Waiting for the '{join_button_selector}' button...")
             
             print(f"Starting recording... Command: {' '.join(ffmpeg_command)}")
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             
-            print("Clicking 'Join now'...")
-            # Playwright's click command automatically waits for the button to be enabled
+            print(f"Clicking '{join_button_selector}'...")
             await page.locator(join_button_selector).click(timeout=15000)
 
-            print(f"✅ Successfully joined. Recording for {duration} seconds.")
+            print(f"✅ Successfully requested to join. Now waiting in the lobby. Recording for {duration} seconds.")
             await asyncio.sleep(duration)
 
         except Exception as e:
