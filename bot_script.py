@@ -28,7 +28,7 @@ def get_ffmpeg_command(platform, duration):
 
 
 async def join_and_record_meeting(url: str, max_duration: int):
-    """Launches a browser, joins a meeting, records until it's the last one, and disables video."""
+    """Launches a browser, joins a meeting, records until it's the last one, and disables video/audio."""
     ffmpeg_command = get_ffmpeg_command(sys.platform, max_duration)
     if not ffmpeg_command:
         print(f"Unsupported OS: {sys.platform}. Could not determine ffmpeg command.")
@@ -68,9 +68,8 @@ async def join_and_record_meeting(url: str, max_duration: int):
             await join_button_locator.click(timeout=15000)
             print("Successfully joined or requested to join.")
             
-            # --- NEW: DISABLE CAMERA LOGIC ---
+            # --- DISABLE CAMERA ---
             try:
-                # Wait for the camera button to be visible after joining
                 camera_button = page.get_by_role("button", name="Turn off camera")
                 await camera_button.wait_for(timeout=10000)
                 await camera_button.click()
@@ -78,26 +77,31 @@ async def join_and_record_meeting(url: str, max_duration: int):
             except TimeoutError:
                 print("Could not find 'Turn off camera' button, or camera was already off.")
             
-            # --- NEW: DYNAMIC RECORDING LOGIC ---
+            # --- NEW: DISABLE MICROPHONE ---
+            try:
+                mic_button = page.get_by_role("button", name="Turn off microphone")
+                await mic_button.wait_for(timeout=10000)
+                await mic_button.click()
+                print("🎤 Microphone turned off.")
+            except TimeoutError:
+                print("Could not find 'Turn off microphone' button, or it was already off.")
+            
+            # --- DYNAMIC RECORDING LOGIC ---
             print("Bot is now in the meeting. Monitoring participant count...")
             check_interval_seconds = 15
             while True:
                 await asyncio.sleep(check_interval_seconds)
                 try:
-                    # This selector targets the button that shows the participant list and the count within it.
-                    # It is the most likely part of the script to break if Google updates its UI.
                     participant_button = page.get_by_role("button", name=re.compile(r"Participants|Show everyone"))
                     participant_count_text = await participant_button.inner_text()
                     participant_count = int(re.search(r'\d+', participant_count_text).group())
 
                     print(f"[{participant_count}] participants in the meeting.")
                     
-                    # If only the bot is left, end the meeting.
                     if participant_count <= 1:
                         print("Only 1 participant left. Ending the recording.")
                         break
                 except (TimeoutError, AttributeError, ValueError):
-                    # If the participant count element can't be found, the meeting may have ended abruptly.
                     print("Could not find participant count. Assuming meeting has ended.")
                     break
                 except Exception as e:
@@ -113,7 +117,7 @@ async def join_and_record_meeting(url: str, max_duration: int):
             print("Cleaning up...")
             if recorder:
                 if recorder.poll() is None:
-                    recorder.terminate() # Stop ffmpeg if it's still running
+                    recorder.terminate() 
                 stdout, stderr = recorder.communicate()
                 if os.path.exists(OUTPUT_FILENAME) and os.path.getsize(OUTPUT_FILENAME) > 0:
                     print(f"✅ Audio recording successful. File saved to {OUTPUT_FILENAME}")
