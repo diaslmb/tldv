@@ -5,29 +5,22 @@ import subprocess
 from playwright.async_api import async_playwright
 
 # --- CONFIGURATION ---
-# The script reads the meeting URL from the command line argument.
-# Example: python bot_script.py "https://meet.google.com/ruc-cqzz-ekr"
 MEETING_URL = sys.argv[1] if len(sys.argv) > 1 else ""
-
-# How long to record for (in seconds). 300 seconds = 5 minutes.
 MEETING_DURATION_SECONDS = 300 
 OUTPUT_FILENAME = "meeting_audio.wav"
 
 def get_ffmpeg_command(platform):
     """Returns the appropriate ffmpeg command based on the operating system."""
     if platform.startswith("linux"):
-        # Records from the default pulse audio output in a Linux environment.
         return [
             "ffmpeg", "-y", "-f", "pulse", "-i", "default",
             "-t", str(MEETING_DURATION_SECONDS), OUTPUT_FILENAME
         ]
     elif platform == "darwin": # macOS
-        # Records from the "BlackHole 2ch" virtual audio device on macOS.
         return [
             "ffmpeg", "-y", "-f", "avfoundation", "-i", ":BlackHole 2ch",
             "-t", str(MEETING_DURATION_SECONDS), OUTPUT_FILENAME
         ]
-    # Add other OS configurations here if needed (e.g., Windows).
     return None
 
 async def join_and_record_meeting(url: str, duration: int):
@@ -40,41 +33,46 @@ async def join_and_record_meeting(url: str, duration: int):
     print("Starting browser...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=False, # Must be False to work inside a virtual display like Xvfb.
+            headless=False,
             args=[
                 "--disable-blink-features=AutomationControlled",
-                "--use-fake-ui-for-media-stream",   # Auto-grant camera/mic permissions.
+                "--use-fake-ui-for-media-stream",
                 "--use-fake-device-for-media-stream",
             ]
         )
         context = await browser.new_context(permissions=["microphone", "camera"])
         page = await context.new_page()
 
-        recorder = None # Initialize recorder to None
+        recorder = None
         try:
             print(f"Navigating to {url}...")
-            # Use a longer timeout for page navigation to handle slower connections.
-            await page.goto(url, timeout=60000) 
+            await page.goto(url, timeout=60000)
 
-            # This is the selector that failed before. We keep it to see why it failed.
-            # The screenshot will tell us if the text should be "Ask to join" or something else.
+            # =========================================================
+            # ===> STEP 1: FILL IN THE NAME <===
+            name_input_selector = 'input[placeholder="Your name"]'
+            print("Waiting for the name input field...")
+            await page.wait_for_selector(name_input_selector, timeout=15000)
+            print("Entering a name...")
+            await page.locator(name_input_selector).fill("NoteTaker Bot")
+            # =========================================================
+
+            # ===> STEP 2: CLICK THE "JOIN NOW" BUTTON <===
             join_button_selector = 'button:has-text("Join now")'
-            
-            print(f"Waiting for selector: '{join_button_selector}'")
-            await page.wait_for_selector(join_button_selector, timeout=30000)
+            print("Waiting for the 'Join now' button to be enabled...")
             
             print(f"Starting recording... Command: {' '.join(ffmpeg_command)}")
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             
             print("Clicking 'Join now'...")
-            await page.locator(join_button_selector).click()
+            # Playwright's click command automatically waits for the button to be enabled
+            await page.locator(join_button_selector).click(timeout=15000)
 
-            print(f"Successfully joined. Recording for {duration} seconds.")
+            print(f"✅ Successfully joined. Recording for {duration} seconds.")
             await asyncio.sleep(duration)
 
         except Exception as e:
             print(f"An error occurred: {e}")
-            # Take a screenshot to help debug what the browser sees.
             await page.screenshot(path="debug_screenshot.png")
             print("📸 Screenshot saved to debug_screenshot.png. Please check this file.")
             
@@ -95,7 +93,6 @@ async def join_and_record_meeting(url: str, duration: int):
 if __name__ == "__main__":
     if not MEETING_URL:
         print("Error: Please provide a meeting URL as a command-line argument.")
-        print('Example: python bot_script.py "https://meet.google.com/abc-defg-hij"')
         sys.exit(1)
     
     asyncio.run(join_and_record_meeting(MEETING_URL, MEETING_DURATION_SECONDS))
