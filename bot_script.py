@@ -1,24 +1,23 @@
 import os
 import sys
-import re  # Import the regular expression module
+import re
 import asyncio
 import subprocess
 from playwright.async_api import async_playwright
 
 # --- CONFIGURATION ---
 MEETING_URL = sys.argv[1] if len(sys.argv) > 1 else ""
-MEETING_DURATION_SECONDS = 300
+MEETING_DURATION_SECONDS = 30
 OUTPUT_FILENAME = "meeting_audio.wav"
 
 
 def get_ffmpeg_command(platform):
-    """Returns the appropriate ffmpeg command based on the operating system."""
     if platform.startswith("linux"):
         return [
             "ffmpeg", "-y", "-f", "pulse", "-i", "default",
             "-t", str(MEETING_DURATION_SECONDS), OUTPUT_FILENAME,
         ]
-    elif platform == "darwin":  # macOS
+    elif platform == "darwin":
         return [
             "ffmpeg", "-y", "-f", "avfoundation", "-i", ":BlackHole 2ch",
             "-t", str(MEETING_DURATION_SECONDS), OUTPUT_FILENAME,
@@ -27,7 +26,6 @@ def get_ffmpeg_command(platform):
 
 
 async def join_and_record_meeting(url: str, duration: int):
-    """Launches a browser, joins a meeting, and records the audio."""
     ffmpeg_command = get_ffmpeg_command(sys.platform)
     if not ffmpeg_command:
         print(f"Unsupported OS: {sys.platform}. Could not determine ffmpeg command.")
@@ -57,10 +55,7 @@ async def join_and_record_meeting(url: str, duration: int):
             print("Entering a name...")
             await page.locator(name_input_selector).fill("NoteTaker Bot")
 
-            # =====================================================================
-            # ===> ROBUST SELECTOR: Finds a button with text "Join now" OR "Ask to join" <===
             join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
-            # =====================================================================
 
             print("Waiting for the join button...")
             await join_button_locator.wait_for(timeout=15000)
@@ -81,19 +76,25 @@ async def join_and_record_meeting(url: str, duration: int):
         except Exception as e:
             print(f"An error occurred: {e}")
             await page.screenshot(path="debug_screenshot.png")
-            print("📸 Screenshot saved to debug_screenshot.png. Please check this file.")
+            print("📸 Screenshot saved to debug_screenshot.png.")
 
         finally:
             print("Cleaning up...")
-            if recorder and recorder.poll() is None:
-                recorder.terminate()
+            # === NEW, MORE ROBUST ERROR HANDLING ===
+            if recorder:
+                # Wait for the ffmpeg process to complete and capture its output
                 stdout, stderr = recorder.communicate()
-                print("Recording process terminated.")
-                if os.path.exists(OUTPUT_FILENAME):
-                    print(f"✅ Audio saved to {OUTPUT_FILENAME}")
+
+                # Check if the output file was created and is not empty
+                if os.path.exists(OUTPUT_FILENAME) and os.path.getsize(OUTPUT_FILENAME) > 0:
+                    print(f"✅ Audio recording successful. File saved to {OUTPUT_FILENAME}")
                 else:
-                    print("❌ Recording failed. FFmpeg error output:")
-                    print(stderr.decode())
+                    print("❌ Recording failed. The output file is missing or empty.")
+                    print("--- FFmpeg Error Output ---")
+                    # Decode stderr to print the error message from ffmpeg
+                    print(stderr.decode('utf-8', 'ignore'))
+                    print("-----------------------------")
+
             await browser.close()
             print("Browser closed.")
 
