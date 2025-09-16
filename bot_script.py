@@ -62,8 +62,7 @@ async def join_and_record_meeting(url: str, max_duration: int):
 
         async def on_caption(speaker, text):
             caption_key = f"{speaker}:{text}"
-            if caption_key in seen_captions:
-                return
+            if caption_key in seen_captions: return
             timestamp = time.time()
             print(f"CAPTURED: [{speaker}] {text}")
             captions_data.append({"speaker": speaker, "caption": text, "timestamp": timestamp})
@@ -140,14 +139,35 @@ async def join_and_record_meeting(url: str, max_duration: int):
             start_time = time.time()
             
             while time.time() - start_time < max_duration:
-                # --- ADDED DEBUGGING SCREENSHOT ---
                 await page.screenshot(path="debug_participant_check.png")
                 print("📸 Took screenshot for participant check debugging.")
 
+                participant_button = None
+                found = False
+                # --- NEW: Multi-selector strategy ---
+                selectors = [
+                    'button[jsname="ME4pNd"]', # A known internal name for the participant button
+                    'button[aria-label*="participant"], button[aria-label*="Participant"]', # English labels
+                    'button[aria-label*="участник"], button[aria-label*="Участники"]', # Russian labels
+                ]
+
+                for selector in selectors:
+                    try:
+                        button = page.locator(selector).first
+                        await button.wait_for(state="visible", timeout=1000)
+                        participant_button = button
+                        print(f"✅ Found participant button with selector: {selector}")
+                        found = True
+                        break
+                    except TimeoutError:
+                        print(f"… Selector failed: {selector}")
+                        continue
+                
+                if not found:
+                    print("❌ All selectors failed. Assuming meeting has ended.")
+                    break
+                
                 try:
-                    participant_button = page.locator('button[aria-label*="participant"], button:has(i.google-material-icons:has-text("people"))')
-                    await participant_button.wait_for(timeout=5000) # Wait for the button to be available
-                    
                     label = await participant_button.get_attribute("aria-label") or ""
                     match = re.search(r'(\d+)', label)
                     
@@ -158,22 +178,10 @@ async def join_and_record_meeting(url: str, max_duration: int):
                             print("👋 Only 1 participant (the bot) is left. Exiting.")
                             break
                     else:
-                        print("Could not find number in participant button label. Checking inner text.")
-                        # Fallback to checking the button's visible text
-                        button_text = await participant_button.inner_text()
-                        match = re.search(r'(\d+)', button_text)
-                        if match:
-                            participant_count = int(match.group(1))
-                            print(f"[{participant_count}] participants in the meeting (from inner text).")
-                            if participant_count <= 1:
-                                print("👋 Only 1 participant (the bot) is left. Exiting.")
-                                break
-                        else:
-                             print("❌ Could not determine participant count. Assuming meeting has ended.")
-                             break
-
-                except (TimeoutError, AttributeError):
-                    print("❌ Could not find participant count button within timeout. Assuming meeting has ended.")
+                        print("❌ Could not find number in participant button label. Assuming meeting has ended.")
+                        break
+                except Exception as e:
+                    print(f"❌ Error while parsing participant count: {e}. Assuming meeting has ended.")
                     break
                 
                 await asyncio.sleep(15)
@@ -187,7 +195,6 @@ async def join_and_record_meeting(url: str, max_duration: int):
             if recorder and recorder.poll() is None:
                 print("Terminating audio recording...")
                 recorder.terminate()
-                # --- FIXED TypeError by running wait in a thread ---
                 try:
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, recorder.wait, 5)
