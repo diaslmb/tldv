@@ -35,7 +35,7 @@ def transcribe_audio(audio_path):
         if response.status_code == 200:
             transcript_data = response.json()
             clean_transcript = transcript_data.get('text', '').replace('<br>', '\n')
-            with open(TRANSCRIPT_FILENAME, 'w') as f:
+            with open(TRANSCRIPT_FILENAME, 'w', encoding='utf-8') as f:
                 f.write(clean_transcript)
             print(f"✅ Transcription successful. Saved to {TRANSCRIPT_FILENAME}")
         else:
@@ -58,20 +58,16 @@ async def join_and_record_meeting(url: str, max_duration: int):
         page = await context.new_page()
         recorder = None
         captions_data = []
-        
-        # A set to store unique caption entries to prevent duplicates
         seen_captions = set()
 
         async def on_caption(speaker, text):
             caption_key = f"{speaker}:{text}"
             if caption_key in seen_captions:
                 return
-
             timestamp = time.time()
             print(f"CAPTURED: [{speaker}] {text}")
             captions_data.append({"speaker": speaker, "caption": text, "timestamp": timestamp})
             seen_captions.add(caption_key)
-
 
         await context.expose_function("on_caption", on_caption)
 
@@ -89,91 +85,83 @@ async def join_and_record_meeting(url: str, max_duration: int):
             join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join", re.IGNORECASE))
             print("Waiting for the join button...")
             await join_button_locator.wait_for(timeout=30000)
-            
+
             print(f"Starting recording for a maximum of {max_duration / 3600:.1f} hours...")
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
+
             print("Clicking the join button...")
             await join_button_locator.click(timeout=15000)
             print("Successfully joined or requested to join.")
-            
+
             await page.wait_for_selector('button[aria-label*="Leave call"]', timeout=60000)
             print("✅ In the meeting.")
 
             print("Trying to turn on captions...")
             captions_button = page.get_by_role("button", name=re.compile("Turn on captions", re.IGNORECASE))
             await captions_button.click(timeout=15000)
-            print("✅ Clicked the main 'Turn on captions' (CC) button.")
+            print("✅ Clicked the 'Turn on captions' (CC) button.")
 
             print("Waiting for captions to appear...")
             await page.wait_for_selector('[role="region"][aria-label*="Captions"]', timeout=20000)
             print("✅ Captions region is visible.")
-            
-            # --- REWRITTEN JAVASCRIPT FOR ACCURATE SPEAKER SCRAPING ---
+
             js_code = """
             () => {
                 const targetNode = document.body;
                 const config = { childList: true, subtree: true };
-                let lastSpeaker = 'Unknown Speaker';
-
+                let lastKnownSpeaker = 'Unknown Speaker';
                 const observer = new MutationObserver((mutationsList) => {
                     for (const mutation of mutationsList) {
-                        mutation.addedNodes.forEach(node => {
-                            if (node.nodeType !== 1) return; // Not an element node
-
-                            // Find all caption containers within the added node
+                        for (const node of mutation.addedNodes) {
+                            if (node.nodeType !== 1) continue;
                             const containers = node.querySelectorAll('div.iTTPOb.VbkSUe');
-                            if (containers.length === 0 && node.matches('div.iTTPOb.VbkSUe')) {
-                                // The added node itself is a container
-                                containers = [node];
-                            }
-
                             containers.forEach(container => {
                                 try {
                                     const speakerElement = container.querySelector('div.zs7s8d.jxF_2d');
-                                    const speakerName = speakerElement ? speakerElement.innerText.trim() : lastSpeaker;
-                                    lastSpeaker = speakerName;
-
+                                    const speakerName = speakerElement ? speakerElement.innerText.trim() : lastKnownSpeaker;
+                                    lastKnownSpeaker = speakerName;
                                     const captionElement = container.querySelector('span[jsname="YSxPC"]');
                                     if (captionElement && captionElement.innerText) {
                                         const captionText = captionElement.innerText.trim();
-                                        if (captionText) {
-                                            window.on_caption(speakerName, captionText);
-                                        }
+                                        if (captionText) window.on_caption(speakerName, captionText);
                                     }
-                                } catch (e) {
-                                    console.error('Error processing caption block:', e);
-                                }
+                                } catch (e) {}
                             });
-                        });
+                        }
                     }
                 });
                 observer.observe(targetNode, config);
-                console.log('✅ Accurate Speaker Caption Observer injected and running.');
+                console.log('✅ Final caption observer injected and running.');
             }
             """
             await page.evaluate(js_code)
 
-            print("Bot is in the meeting. Monitoring participant count...")
+            print("Bot is in the meeting. Monitoring participant count to determine when to leave.")
             start_time = time.time()
             
+            # --- RE-IMPLEMENTED PARTICIPANT COUNT EXIT LOGIC ---
             while time.time() - start_time < max_duration:
-                # --- NEW: RELIABLE PARTICIPANT COUNT EXIT CONDITION ---
                 try:
-                    participant_button = page.get_by_role("button", name=re.compile(r"Participants|Show everyone", re.IGNORECASE))
-                    # The participant count is in the aria-label or inner text
-                    button_text = await participant_button.inner_text()
-                    match = re.search(r'\d+', button_text)
+                    # This selector targets the button that shows the participant list.
+                    # It's more reliable than text-based selectors.
+                    participant_button = page.locator('button[aria-label*="participant"], button[aria-label*="участник"]')
+                    
+                    # Get the full label to extract the number
+                    label = await participant_button.get_attribute("aria-label")
+                    if not label:
+                        label = await participant_button.inner_text()
+
+                    match = re.search(r'(\d+)', label)
+                    
                     if match:
-                        participant_count = int(match.group())
+                        participant_count = int(match.group(1))
                         print(f"[{participant_count}] participants in the meeting.")
                         if participant_count <= 1:
                             print("👋 Only 1 participant (the bot) is left. Exiting.")
                             break
                     else:
-                        # Fallback if number not found in text, might indicate meeting ended
-                        print("Could not determine participant count from button. Assuming meeting ended.")
-                        break
+                        print("Could not find number in participant button label. Assuming meeting has ended.")
+                        break # Exit if we can't parse the number
                 except (TimeoutError, AttributeError):
                     print("❌ Could not find participant count button. Assuming meeting has ended.")
                     break
@@ -189,19 +177,23 @@ async def join_and_record_meeting(url: str, max_duration: int):
             if recorder and recorder.poll() is None:
                 print("Terminating audio recording...")
                 recorder.terminate()
-                await asyncio.sleep(2)
-                
+                try:
+                    await asyncio.wait_for(asyncio.create_task(recorder.wait()), timeout=5.0)
+                except asyncio.TimeoutError:
+                    print("FFmpeg took too long to terminate, killing.")
+                    recorder.kill()
+
             if os.path.exists(OUTPUT_FILENAME) and os.path.getsize(OUTPUT_FILENAME) > 0:
                 print(f"✅ Audio recording successful. File saved to {OUTPUT_FILENAME}")
                 transcribe_audio(OUTPUT_FILENAME)
             else:
-                print("❌ Recording failed or was empty.")
-            
+                print("❌ Recording failed or the file was empty.")
+
             if captions_data:
                 with open(CAPTIONS_FILENAME, 'w', encoding='utf-8') as f:
                     json.dump(captions_data, f, indent=4, ensure_ascii=False)
                 print(f"✅ Captions with speaker names saved to {CAPTIONS_FILENAME}")
-            
+
             await browser.close()
             print("Browser closed.")
 
