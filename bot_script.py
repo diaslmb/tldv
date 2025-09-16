@@ -59,11 +59,15 @@ async def join_and_record_meeting(url: str, max_duration: int):
         recorder = None
         captions_data = []
         seen_captions = set()
+        last_caption_time = time.time()
 
         async def on_caption(speaker, text):
+            nonlocal last_caption_time
             caption_key = f"{speaker}:{text}"
             if caption_key in seen_captions: return
+            
             timestamp = time.time()
+            last_caption_time = timestamp # Update the time of the last seen caption
             print(f"CAPTURED: [{speaker}] {text}")
             captions_data.append({"speaker": speaker, "caption": text, "timestamp": timestamp})
             seen_captions.add(caption_key)
@@ -135,56 +139,28 @@ async def join_and_record_meeting(url: str, max_duration: int):
             """
             await page.evaluate(js_code)
 
-            print("Bot is in the meeting. Monitoring participant count to determine when to leave.")
+            print("Bot is in the meeting. Monitoring for exit conditions...")
             start_time = time.time()
+            IDLE_TIMEOUT_SECONDS = 300 # 5 minutes
             
+            # --- FINAL EXIT LOGIC ---
             while time.time() - start_time < max_duration:
-                await page.screenshot(path="debug_participant_check.png")
-                print("📸 Took screenshot for participant check debugging.")
-
-                participant_button = None
-                found = False
-                # --- NEW: Multi-selector strategy ---
-                selectors = [
-                    'button[jsname="ME4pNd"]', # A known internal name for the participant button
-                    'button[aria-label*="participant"], button[aria-label*="Participant"]', # English labels
-                    'button[aria-label*="участник"], button[aria-label*="Участники"]', # Russian labels
-                ]
-
-                for selector in selectors:
-                    try:
-                        button = page.locator(selector).first
-                        await button.wait_for(state="visible", timeout=1000)
-                        participant_button = button
-                        print(f"✅ Found participant button with selector: {selector}")
-                        found = True
-                        break
-                    except TimeoutError:
-                        print(f"… Selector failed: {selector}")
-                        continue
-                
-                if not found:
-                    print("❌ All selectors failed. Assuming meeting has ended.")
-                    break
-                
+                # Check 1: Look for the "No one else is here" banner
                 try:
-                    label = await participant_button.get_attribute("aria-label") or ""
-                    match = re.search(r'(\d+)', label)
-                    
-                    if match:
-                        participant_count = int(match.group(1))
-                        print(f"[{participant_count}] participants in the meeting.")
-                        if participant_count <= 1:
-                            print("👋 Only 1 participant (the bot) is left. Exiting.")
-                            break
-                    else:
-                        print("❌ Could not find number in participant button label. Assuming meeting has ended.")
+                    is_alone_banner = page.locator('div:text-matches("No one else is here|Кроме вас, здесь никого нет", "i")')
+                    if await is_alone_banner.is_visible(timeout=1000):
+                        print("👋 'No one else is here' banner detected. Exiting.")
                         break
-                except Exception as e:
-                    print(f"❌ Error while parsing participant count: {e}. Assuming meeting has ended.")
+                except TimeoutError:
+                    pass # Banner not found, continue
+
+                # Check 2: Exit if no captions have been seen for a while
+                if time.time() - last_caption_time > IDLE_TIMEOUT_SECONDS:
+                    print(f"🕒 No new captions for {IDLE_TIMEOUT_SECONDS} seconds. Assuming meeting has ended. Exiting.")
                     break
                 
-                await asyncio.sleep(15)
+                print(f"Monitoring... (No new captions for {time.time() - last_caption_time:.0f}s)")
+                await asyncio.sleep(15) # Check every 15 seconds
 
         except Exception as e:
             print(f"An error occurred: {e}")
