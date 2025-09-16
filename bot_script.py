@@ -108,33 +108,55 @@ async def join_and_record_meeting(url: str, max_duration: int):
             await page.wait_for_selector('[role="region"][aria-label*="Captions"]', timeout=20000)
             print("✅ Captions region is visible.")
 
+            # --- FINAL, MOST ROBUST JAVASCRIPT SCRAPER ---
             js_code = """
             () => {
-                const targetNode = document.body;
+                const captionRegion = document.querySelector('[role="region"][aria-label*="Captions"]');
+                if (!captionRegion) {
+                    console.error('Could not find caption region to observe.');
+                    return;
+                }
+
                 const config = { childList: true, subtree: true };
                 let lastKnownSpeaker = 'Unknown Speaker';
+
+                const processNode = (node) => {
+                    if (node.nodeType !== 1) return; // Not an element
+
+                    // The speaker is often in the first div with text content
+                    const speakerElement = node.querySelector('div');
+                    if (speakerElement && speakerElement.textContent) {
+                        lastKnownSpeaker = speakerElement.textContent.trim();
+                    }
+
+                    // The caption text is usually in one or more spans
+                    const captionSpans = node.querySelectorAll('span');
+                    let fullCaption = '';
+                    if (captionSpans.length > 0) {
+                        captionSpans.forEach(span => {
+                            fullCaption += span.textContent + ' ';
+                        });
+                    } else {
+                        // Fallback if no spans are found
+                        fullCaption = node.textContent.replace(lastKnownSpeaker, '').trim();
+                    }
+
+                    fullCaption = fullCaption.trim();
+                    if (fullCaption) {
+                        window.on_caption(lastKnownSpeaker, fullCaption);
+                    }
+                };
+
                 const observer = new MutationObserver((mutationsList) => {
                     for (const mutation of mutationsList) {
                         for (const node of mutation.addedNodes) {
-                            if (node.nodeType !== 1) continue;
-                            const containers = node.querySelectorAll('div.iTTPOb.VbkSUe');
-                            containers.forEach(container => {
-                                try {
-                                    const speakerElement = container.querySelector('div.zs7s8d.jxF_2d');
-                                    const speakerName = speakerElement ? speakerElement.innerText.trim() : lastKnownSpeaker;
-                                    lastKnownSpeaker = speakerName;
-                                    const captionElement = container.querySelector('span[jsname="YSxPC"]');
-                                    if (captionElement && captionElement.innerText) {
-                                        const captionText = captionElement.innerText.trim();
-                                        if (captionText) window.on_caption(speakerName, captionText);
-                                    }
-                                } catch (e) {}
-                            });
+                            processNode(node);
                         }
                     }
                 });
-                observer.observe(targetNode, config);
-                console.log('✅ Final caption observer injected and running.');
+
+                observer.observe(captionRegion, config);
+                console.log('✅ Final, robust caption observer injected and running.');
             }
             """
             await page.evaluate(js_code)
@@ -143,7 +165,6 @@ async def join_and_record_meeting(url: str, max_duration: int):
             start_time = time.time()
             IDLE_TIMEOUT_SECONDS = 300 # 5 minutes
             
-            # --- FINAL EXIT LOGIC ---
             while time.time() - start_time < max_duration:
                 # Check 1: Look for the "No one else is here" banner
                 try:
@@ -160,7 +181,7 @@ async def join_and_record_meeting(url: str, max_duration: int):
                     break
                 
                 print(f"Monitoring... (No new captions for {time.time() - last_caption_time:.0f}s)")
-                await asyncio.sleep(15) # Check every 15 seconds
+                await asyncio.sleep(15)
 
         except Exception as e:
             print(f"An error occurred: {e}")
