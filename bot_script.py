@@ -90,15 +90,20 @@ async def join_and_record_meeting(url: str, max_duration: int):
             print("Entering a name...")
             await page.locator('input[placeholder="Your name"]').fill("NoteTaker Bot")
 
+            # --- NEW: Turn off mic and camera BEFORE joining ---
             try:
-                # Нажимаем на кнопку выключения микрофона на экране превью
-                await page.locator('div.U26fgb.JRY2Pb.m9AMl.iWO5td.av-E4.M9Bg4d').click()
+                # Ищем кнопку, в названии которой есть "microphone", и нажимаем на нее
+                await page.get_by_role("button", name=re.compile("microphone", re.IGNORECASE)).click(timeout=10000)
                 print("🎤 Microphone turned off before joining.")
-                # Нажимаем на кнопку выключения камеры на экране превью
-                await page.locator('div.U26fgb.JRY2Pb.m9AMl.iWO5td.av-E4.M9Bg4d').nth(1).click()
+            except Exception as e:
+                print(f"Could not turn off microphone before joining. It will be turned off after joining. Error: {e}")
+            
+            try:
+                # Ищем кнопку, в названии которой есть "camera", и нажимаем на нее
+                await page.get_by_role("button", name=re.compile("camera", re.IGNORECASE)).click(timeout=10000)
                 print("📸 Camera turned off before joining.")
             except Exception as e:
-                print(f"Could not turn off mic/camera before joining: {e}")
+                print(f"Could not turn off camera before joining. It will be turned off after joining. Error: {e}")
 
             join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
             print("Waiting for the join button...")
