@@ -227,6 +227,47 @@ def transcribe_and_map_speakers(audio_path, captions_data):
         import traceback
         traceback.print_exc()
 
+async def debug_page_elements(page):
+    """Debug function to help identify caption and participant elements"""
+    print("🔍 Debugging page elements...")
+    try:
+        # Look for any elements containing "caption" or "participant"
+        all_elements = await page.query_selector_all("*")
+        caption_elements = []
+        participant_elements = []
+        
+        for element in all_elements[:100]:  # Limit to first 100 elements
+            try:
+                element_text = await element.inner_text()
+                element_html = await element.evaluate("el => el.outerHTML")
+                
+                if element_text and len(element_text.strip()) > 0:
+                    if any(word in element_text.lower() for word in ['caption', 'subtitle']):
+                        caption_elements.append({
+                            'text': element_text[:100],
+                            'html': element_html[:200]
+                        })
+                    elif any(word in element_text.lower() for word in ['participant', 'people']):
+                        participant_elements.append({
+                            'text': element_text[:50],
+                            'html': element_html[:200]
+                        })
+            except:
+                continue
+        
+        print(f"Found {len(caption_elements)} potential caption elements:")
+        for i, elem in enumerate(caption_elements[:3]):
+            print(f"  {i+1}. Text: {elem['text']}")
+            print(f"      HTML: {elem['html']}")
+            
+        print(f"Found {len(participant_elements)} potential participant elements:")
+        for i, elem in enumerate(participant_elements[:3]):
+            print(f"  {i+1}. Text: {elem['text']}")
+            print(f"      HTML: {elem['html']}")
+            
+    except Exception as e:
+        print(f"Debug failed: {e}")
+
 async def join_and_record_meeting(url: str, max_duration: int):
     ffmpeg_command = get_ffmpeg_command(sys.platform, max_duration)
     if not ffmpeg_command:
@@ -292,57 +333,167 @@ async def join_and_record_meeting(url: str, max_duration: int):
             # Grace period for captions to appear
             print("Waiting 15 seconds for meeting to stabilize and captions to start...")
             await asyncio.sleep(15)
+            
+            # Debug page elements
+            await debug_page_elements(page)
 
             # Dynamic recording and caption scraping logic
             print("Bot is now in the meeting. Monitoring participant count and scraping captions...")
             check_interval_seconds = 5
             seen_captions = set()
+            consecutive_no_participants = 0
+            max_no_participants = 3  # Allow 3 consecutive failures before exiting
             
             while True:
                 await asyncio.sleep(check_interval_seconds)
                 try:
-                    # Scrape captions
-                    caption_containers = await page.query_selector_all("div.iTTPOb.VbkSUe")
-                    for container in caption_containers:
+                    # Try multiple caption selectors (Google Meet changes frequently)
+                    caption_selectors = [
+                        "div.iTTPOb.VbkSUe",  # Original selector
+                        "[data-caption-text]",  # Possible data attribute
+                        ".caption-text",  # Generic class
+                        "[role='log'] div",  # Accessibility role
+                        ".captions-text",  # Alternative class
+                        "div[jsname] span",  # Generic js element with span
+                        ".live-caption",  # Live caption class
+                    ]
+                    
+                    captions_found = False
+                    for selector in caption_selectors:
                         try:
-                            speaker_element = await container.query_selector("div.zs7s8d.jxF_2d")
-                            speaker_name = await speaker_element.inner_text() if speaker_element else "Unknown"
-                            caption_text_element = await container.query_selector("span[jsname='YSxPC']")
-                            caption_text = await caption_text_element.inner_text() if caption_text_element else ""
-                            
-                            caption_key = f"{speaker_name}:{caption_text}"
-                            if caption_text and caption_key not in seen_captions:
-                                timestamp = asyncio.get_event_loop().time()
-                                captions_data.append({
-                                    "speaker": speaker_name, 
-                                    "caption": caption_text, 
-                                    "timestamp": timestamp
-                                })
-                                seen_captions.add(caption_key)
-                                print(f"CAPTURED: [{speaker_name}] {caption_text}")
+                            caption_containers = await page.query_selector_all(selector)
+                            if caption_containers:
+                                print(f"📝 Found {len(caption_containers)} caption elements using selector: {selector}")
+                                captions_found = True
+                                
+                                for container in caption_containers:
+                                    try:
+                                        # Try multiple ways to extract speaker and text
+                                        speaker_name = "Unknown"
+                                        caption_text = ""
+                                        
+                                        # Method 1: Original selectors
+                                        try:
+                                            speaker_element = await container.query_selector("div.zs7s8d.jxF_2d")
+                                            if speaker_element:
+                                                speaker_name = await speaker_element.inner_text()
+                                            caption_text_element = await container.query_selector("span[jsname='YSxPC']")
+                                            if caption_text_element:
+                                                caption_text = await caption_text_element.inner_text()
+                                        except:
+                                            pass
+                                        
+                                        # Method 2: Generic text extraction
+                                        if not caption_text:
+                                            try:
+                                                full_text = await container.inner_text()
+                                                if full_text and len(full_text.strip()) > 0:
+                                                    lines = full_text.strip().split('\n')
+                                                    if len(lines) >= 2:
+                                                        speaker_name = lines[0].strip()
+                                                        caption_text = ' '.join(lines[1:]).strip()
+                                                    elif len(lines) == 1:
+                                                        caption_text = lines[0].strip()
+                                            except:
+                                                pass
+                                        
+                                        # Method 3: Just get all text if nothing else works
+                                        if not caption_text:
+                                            try:
+                                                caption_text = await container.inner_text()
+                                                caption_text = caption_text.strip()
+                                            except:
+                                                pass
+                                        
+                                        if caption_text and len(caption_text) > 3:  # Minimum length filter
+                                            caption_key = f"{speaker_name}:{caption_text}"
+                                            if caption_key not in seen_captions:
+                                                timestamp = asyncio.get_event_loop().time()
+                                                captions_data.append({
+                                                    "speaker": speaker_name, 
+                                                    "caption": caption_text, 
+                                                    "timestamp": timestamp
+                                                })
+                                                seen_captions.add(caption_key)
+                                                print(f"CAPTURED: [{speaker_name}] {caption_text}")
+                                                
+                                    except Exception as e:
+                                        print(f"Could not process a caption container: {e}")
+                                break  # Found captions with this selector, no need to try others
                         except Exception as e:
-                            print(f"Could not process a caption block: {e}")
+                            continue  # Try next selector
+                    
+                    if not captions_found:
+                        print("🔍 No captions found with any selector. Checking page content...")
+                        # Debug: Print some page content to see what's available
+                        try:
+                            page_content = await page.content()
+                            if "iTTPOb" in page_content:
+                                print("📝 Found iTTPOb in page content - captions may be present")
+                            if "caption" in page_content.lower():
+                                print("📝 Found 'caption' text in page content")
+                        except:
+                            pass
 
-                    # Check participant count
-                    participant_button = page.get_by_role("button", name=re.compile(r"Participants|Show everyone"))
-                    participant_count_text = await participant_button.inner_text()
-                    match = re.search(r'\d+', participant_count_text)
-                    if match:
-                        participant_count = int(match.group())
-                        print(f"[{participant_count}] participants in the meeting.")
-                        if participant_count <= 1:
-                            print("Only 1 participant left. Ending the recording.")
+                    # Check participant count with multiple selectors
+                    participant_selectors = [
+                        "button[aria-label*='participant']",
+                        "button[aria-label*='Show everyone']",
+                        "button[data-tooltip*='participant']",
+                        "button[title*='participant']",
+                        "[role='button']:has-text('participant')",
+                        "div[data-participant-count]",
+                    ]
+                    
+                    participant_found = False
+                    for p_selector in participant_selectors:
+                        try:
+                            if "has-text" in p_selector:
+                                # Handle Playwright text selector
+                                participant_elements = await page.query_selector_all("button")
+                                for btn in participant_elements:
+                                    btn_text = await btn.inner_text()
+                                    if "participant" in btn_text.lower():
+                                        match = re.search(r'\d+', btn_text)
+                                        if match:
+                                            participant_count = int(match.group())
+                                            print(f"[{participant_count}] participants in the meeting.")
+                                            participant_found = True
+                                            consecutive_no_participants = 0
+                                            if participant_count <= 1:
+                                                print("Only 1 participant left. Ending the recording.")
+                                                return  # Exit the function to end recording
+                                            break
+                            else:
+                                participant_button = await page.query_selector(p_selector)
+                                if participant_button:
+                                    participant_count_text = await participant_button.inner_text()
+                                    match = re.search(r'\d+', participant_count_text)
+                                    if match:
+                                        participant_count = int(match.group())
+                                        print(f"[{participant_count}] participants in the meeting.")
+                                        participant_found = True
+                                        consecutive_no_participants = 0
+                                        if participant_count <= 1:
+                                            print("Only 1 participant left. Ending the recording.")
+                                            return  # Exit the function to end recording
+                                        break
+                        except:
+                            continue
+                    
+                    if not participant_found:
+                        consecutive_no_participants += 1
+                        print(f"Could not find participant count ({consecutive_no_participants}/{max_no_participants}). Continuing...")
+                        if consecutive_no_participants >= max_no_participants:
+                            print("Multiple failures to find participant count. Assuming meeting has ended.")
                             break
-                    else:
-                        print("Could not determine participant count from text. Assuming meeting has ended.")
-                        break
                         
-                except (TimeoutError, AttributeError):
-                    print("Could not find participant count button. Assuming meeting has ended.")
-                    break
                 except Exception as e:
-                    print(f"An unexpected error occurred while checking participants or scraping captions: {e}")
-                    break
+                    print(f"An unexpected error occurred while monitoring meeting: {e}")
+                    consecutive_no_participants += 1
+                    if consecutive_no_participants >= max_no_participants:
+                        print("Too many consecutive errors. Ending recording.")
+                        break
                     
         except Exception as e:
             print(f"An error occurred during setup or joining: {e}")
