@@ -6,7 +6,7 @@ import subprocess
 from playwright.async_api import async_playwright, TimeoutError
 import json
 import time
-import requests # <-- FIXED: Added the missing import
+import requests
 
 # --- CONFIGURATION ---
 MEETING_URL = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -58,11 +58,20 @@ async def join_and_record_meeting(url: str, max_duration: int):
         page = await context.new_page()
         recorder = None
         captions_data = []
+        last_caption_time = time.time()
 
         async def on_caption(speaker, text):
+            nonlocal last_caption_time
+            # Filter out common UI text that gets mistakenly captured
+            if any(phrase in text.lower() for phrase in ["no one else is here", "backgrounds and effects", "visual effects"]):
+                return
+            
+            # Prevent rapid duplicates
             if captions_data and captions_data[-1]["caption"] == text and captions_data[-1]["speaker"] == speaker:
                 return
+
             timestamp = time.time()
+            last_caption_time = timestamp
             print(f"CAPTURED: [{speaker}] {text}")
             captions_data.append({"speaker": speaker, "caption": text, "timestamp": timestamp})
 
@@ -98,47 +107,53 @@ async def join_and_record_meeting(url: str, max_duration: int):
                 await got_it_button.click()
                 print("✅ Closed the 'Got it' pop-up window.")
 
-            # --- FIXED: ROBUST CAPTION ACTIVATION ---
             print("Trying to turn on captions...")
-            try:
-                # First, try to find the main CC button on the control bar
-                captions_button = page.get_by_role("button", name=re.compile("Turn on captions", re.IGNORECASE))
-                await captions_button.click(timeout=15000)
-                print("✅ Clicked the main 'Turn on captions' (CC) button.")
-            except TimeoutError:
-                print("⚠️ Main CC button not found. Will try activating via menu as a fallback.")
-                try:
-                    await page.get_by_role("button", name="More options").click()
-                    await page.get_by_role("menuitem", name=re.compile("Captions|Turn on captions", re.IGNORECASE)).click()
-                except Exception as e:
-                    raise Exception(f"Could not enable captions via button or menu. Captions may be disabled for this meeting. Error: {e}")
+            captions_button = page.get_by_role("button", name=re.compile("Turn on captions", re.IGNORECASE))
+            await captions_button.click(timeout=15000)
+            print("✅ Clicked the main 'Turn on captions' (CC) button.")
 
             print("Waiting for captions to appear...")
             await page.wait_for_selector('[role="region"][aria-label*="Captions"]', timeout=20000)
             print("✅ Captions region is visible.")
             
+            # --- IMPROVED JAVASCRIPT FOR SPEAKER/CAPTION SCRAPING ---
             js_code = """
             () => {
                 const targetNode = document.body;
                 const config = { childList: true, subtree: true, characterData: true };
                 let lastSpeaker = 'Unknown Speaker';
-                const speakerBadgeSelector = '.NWpY1d, .xoMHSc';
+                // This selector is crucial for identifying the speaker's name badge.
+                const speakerBadgeSelector = '[data-self-name="You"] > div, .xt3V2d';
 
                 const handleNode = (node) => {
                     if (typeof node.querySelector !== 'function') return;
+                    
                     const speakerElement = node.querySelector(speakerBadgeSelector);
-                    let speaker = speakerElement ? speakerElement.textContent.trim() : lastSpeaker;
-                    if (speaker !== 'Unknown Speaker') {
-                        lastSpeaker = speaker;
+                    if (speakerElement && speakerElement.textContent) {
+                         lastSpeaker = speakerElement.textContent.trim();
                     }
+                    
                     const clone = node.cloneNode(true);
                     const speakerLabelInClone = clone.querySelector(speakerBadgeSelector);
                     if (speakerLabelInClone) speakerLabelInClone.remove();
-                    const captionText = clone.textContent?.trim() || "";
-                    if (captionText && captionText.toLowerCase() !== speaker.toLowerCase()) {
-                        window.on_caption(speaker, captionText);
+
+                    // This selector targets the actual caption text spans.
+                    const captionSpans = clone.querySelectorAll('span[jsname="YSxPC"]');
+                    if (captionSpans.length > 0) {
+                        for (const span of captionSpans) {
+                            const captionText = span.textContent?.trim() || "";
+                             if (captionText && captionText.toLowerCase() !== lastSpeaker.toLowerCase()) {
+                                window.on_caption(lastSpeaker, captionText);
+                            }
+                        }
+                    } else { // Fallback for other text content
+                        const fallbackText = clone.textContent?.trim() || "";
+                         if (fallbackText && fallbackText.toLowerCase() !== lastSpeaker.toLowerCase()) {
+                            window.on_caption(lastSpeaker, fallbackText);
+                        }
                     }
                 };
+
                 const observer = new MutationObserver((mutationsList) => {
                     for (const mutation of mutationsList) {
                         if (mutation.type === 'childList') {
@@ -156,8 +171,26 @@ async def join_and_record_meeting(url: str, max_duration: int):
             """
             await page.evaluate(js_code)
 
-            print(f"Bot is now in the meeting and will run for {max_duration} seconds.")
-            await asyncio.sleep(max_duration)
+            print("Bot is in the meeting. Monitoring for exit conditions...")
+            start_time = time.time()
+            IDLE_TIMEOUT_SECONDS = 300 # 5 minutes
+            
+            while time.time() - start_time < max_duration:
+                # --- NEW: EXIT CONDITION CHECKS ---
+                # Check 1: Did everyone leave?
+                if await page.locator('text="No one else is here"').is_visible():
+                    print("👋 Everyone left the meeting. Exiting.")
+                    break
+                # Check 2: Did we get kicked out or leave manually?
+                if await page.locator('text=/You left the meeting|You\'ve been removed/').is_visible():
+                    print("👋 Bot has left the meeting. Exiting.")
+                    break
+                # Check 3: Has it been too long since the last caption?
+                if time.time() - last_caption_time > IDLE_TIMEOUT_SECONDS:
+                    print(f"🕒 No new captions for {IDLE_TIMEOUT_SECONDS} seconds. Exiting.")
+                    break
+                
+                await asyncio.sleep(10) # Check every 10 seconds
 
         except Exception as e:
             print(f"An error occurred: {e}")
