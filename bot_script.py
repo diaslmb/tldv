@@ -6,6 +6,7 @@ import subprocess
 from playwright.async_api import async_playwright, TimeoutError
 import json
 import requests
+import time
 
 # --- CONFIGURATION ---
 MEETING_URL = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -57,6 +58,18 @@ async def join_and_record_meeting(url: str, max_duration: int):
         page = await context.new_page()
         recorder = None
         captions_data = []
+        seen_captions = set()
+
+        # This function will be called from the browser's JS context
+        async def on_caption(speaker, text):
+            caption_key = f"{speaker}:{text}"
+            if text and caption_key not in seen_captions:
+                timestamp = time.time()
+                print(f"CAPTURED: [{speaker}] {text}")
+                captions_data.append({"speaker": speaker, "caption": text, "timestamp": timestamp})
+                seen_captions.add(caption_key)
+
+        await context.expose_function("on_caption", on_caption)
 
         try:
             print(f"Navigating to {url}...")
@@ -64,21 +77,14 @@ async def join_and_record_meeting(url: str, max_duration: int):
             print("Entering a name...")
             await page.locator('input[placeholder="Your name"]').fill("NoteTaker Bot")
 
-            # --- Turn off mic and camera BEFORE joining ---
-            try:
-                await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
-                print("🎤 Microphone turned off before joining.")
-            except Exception:
-                print("Could not turn off microphone before joining.")
-            try:
-                await page.get_by_role("button", name="Turn off camera").click(timeout=10000)
-                print("📸 Camera turned off before joining.")
-            except Exception:
-                print("Could not turn off camera before joining.")
+            await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
+            print("🎤 Microphone turned off before joining.")
+            await page.get_by_role("button", name="Turn off camera").click(timeout=10000)
+            print("📸 Camera turned off before joining.")
 
-            join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
+            join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join", re.IGNORECASE))
             print("Waiting for the join button...")
-            await join_button_locator.wait_for(timeout=15000)
+            await join_button_locator.wait_for(timeout=30000)
             
             print(f"Starting recording for a maximum of {max_duration / 3600:.1f} hours...")
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -93,40 +99,76 @@ async def join_and_record_meeting(url: str, max_duration: int):
             except TimeoutError:
                 print("Initial pop-up not found, continuing...")
 
-            try:
-                await page.get_by_role("button", name="Turn on captions").click(timeout=10000)
-                print("📝 Captions turned on.")
-            except TimeoutError:
-                print("Could not find 'Turn on captions' button, or captions were already on.")
+            # --- UPDATED CAPTION ACTIVATION LOGIC ---
+            print("Trying to turn on captions...")
+            captions_on = False
+            # Try keyboard shortcut first
+            for i in range(5):
+                await page.keyboard.press("c")
+                await asyncio.sleep(0.5)
+                if await page.locator('[aria-label*="captions are available"]').is_visible():
+                     print("✅ Captions enabled via keyboard shortcut.")
+                     captions_on = True
+                     break
             
-            # --- NEW: GRACE PERIOD FOR CAPTIONS TO APPEAR ---
-            print("Waiting 15 seconds for meeting to stabilize and captions to start...")
-            await asyncio.sleep(15)
+            # Fallback to clicking the button if shortcut fails
+            if not captions_on:
+                try:
+                    await page.get_by_role("button", name="Turn on captions").click(timeout=10000)
+                    print("✅ Captions enabled via button click.")
+                except TimeoutError:
+                    print("❌ Could not find 'Turn on captions' button. Captions may fail.")
 
-            # --- DYNAMIC RECORDING AND CAPTION SCRAPING LOGIC ---
-            print("Bot is now in the meeting. Monitoring participant count and scraping captions...")
-            check_interval_seconds = 5
-            seen_captions = set()
+            await asyncio.sleep(5) # Grace period for captions to initialize
+
+            # --- INJECT JAVASCRIPT TO OBSERVE CAPTIONS ---
+            js_code = """
+            () => {
+                const targetNode = document.body;
+                const config = { childList: true, subtree: true, characterData: true };
+
+                let lastSpeaker = 'Unknown';
+                const seenCaptions = new Set();
+
+                const callback = (mutationsList, observer) => {
+                    const captionBoxes = document.querySelectorAll('div.iTTPOb.VbkSUe');
+                    if (captionBoxes.length === 0) return;
+
+                    for (const container of captionBoxes) {
+                        try {
+                            const speakerElement = container.querySelector('div.zs7s8d.jxF_2d');
+                            const speakerName = speakerElement ? speakerElement.innerText.trim() : lastSpeaker;
+                            lastSpeaker = speakerName;
+
+                            const captionElement = container.querySelector('span[jsname="YSxPC"]');
+                            if (!captionElement) continue;
+                            
+                            const captionText = captionElement.innerText.trim();
+                            const captionKey = `${speakerName}:${captionText}`;
+
+                            if (captionText && !seenCaptions.has(captionKey)) {
+                                seenCaptions.add(captionKey);
+                                window.on_caption(speakerName, captionText);
+                            }
+                        } catch (e) {
+                            // console.error('Error processing caption block:', e);
+                        }
+                    }
+                };
+
+                const observer = new MutationObserver(callback);
+                observer.observe(targetNode, config);
+                console.log('✅ Caption observer injected and running.');
+            }
+            """
+            await page.evaluate(js_code)
+
+            print("Bot is now in the meeting. Monitoring participant count...")
+            check_interval_seconds = 10
             while True:
                 await asyncio.sleep(check_interval_seconds)
                 try:
-                    caption_containers = await page.query_selector_all("div.iTTPOb.VbkSUe")
-                    for container in caption_containers:
-                        try:
-                            speaker_element = await container.query_selector("div.zs7s8d.jxF_2d")
-                            speaker_name = await speaker_element.inner_text() if speaker_element else "Unknown"
-                            caption_text_element = await container.query_selector("span[jsname='YSxPC']")
-                            caption_text = await caption_text_element.inner_text() if caption_text_element else ""
-                            caption_key = f"{speaker_name}:{caption_text}"
-                            if caption_text and caption_key not in seen_captions:
-                                timestamp = asyncio.get_event_loop().time()
-                                captions_data.append({"speaker": speaker_name, "caption": caption_text, "timestamp": timestamp})
-                                seen_captions.add(caption_key)
-                                print(f"CAPTURED: [{speaker_name}] {caption_text}")
-                        except Exception as e:
-                            print(f"Could not process a caption block: {e}")
-
-                    participant_button = page.get_by_role("button", name=re.compile(r"Participants|Show everyone"))
+                    participant_button = page.get_by_role("button", name=re.compile(r"Participants|Show everyone", re.IGNORECASE))
                     participant_count_text = await participant_button.inner_text()
                     match = re.search(r'\d+', participant_count_text)
                     if match:
@@ -142,7 +184,7 @@ async def join_and_record_meeting(url: str, max_duration: int):
                     print("Could not find participant count button. Assuming meeting has ended.")
                     break
                 except Exception as e:
-                    print(f"An unexpected error occurred while checking participants or scraping captions: {e}")
+                    print(f"An unexpected error occurred while checking participants: {e}")
                     break
         except Exception as e:
             print(f"An error occurred during setup or joining: {e}")
