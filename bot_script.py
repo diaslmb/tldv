@@ -58,22 +58,20 @@ async def join_and_record_meeting(url: str, max_duration: int):
         page = await context.new_page()
         recorder = None
         captions_data = []
-        last_caption_time = time.time()
+        
+        # A set to store unique caption entries to prevent duplicates
+        seen_captions = set()
 
         async def on_caption(speaker, text):
-            nonlocal last_caption_time
-            # Filter out common UI text that gets mistakenly captured
-            if any(phrase in text.lower() for phrase in ["no one else is here", "backgrounds and effects", "visual effects"]):
-                return
-            
-            # Prevent rapid duplicates
-            if captions_data and captions_data[-1]["caption"] == text and captions_data[-1]["speaker"] == speaker:
+            caption_key = f"{speaker}:{text}"
+            if caption_key in seen_captions:
                 return
 
             timestamp = time.time()
-            last_caption_time = timestamp
             print(f"CAPTURED: [{speaker}] {text}")
             captions_data.append({"speaker": speaker, "caption": text, "timestamp": timestamp})
+            seen_captions.add(caption_key)
+
 
         await context.expose_function("on_caption", on_caption)
 
@@ -102,11 +100,6 @@ async def join_and_record_meeting(url: str, max_duration: int):
             await page.wait_for_selector('button[aria-label*="Leave call"]', timeout=60000)
             print("✅ In the meeting.")
 
-            got_it_button = page.get_by_role("button", name="Got it")
-            if await got_it_button.is_visible(timeout=5000):
-                await got_it_button.click()
-                print("✅ Closed the 'Got it' pop-up window.")
-
             print("Trying to turn on captions...")
             captions_button = page.get_by_role("button", name=re.compile("Turn on captions", re.IGNORECASE))
             await captions_button.click(timeout=15000)
@@ -116,81 +109,76 @@ async def join_and_record_meeting(url: str, max_duration: int):
             await page.wait_for_selector('[role="region"][aria-label*="Captions"]', timeout=20000)
             print("✅ Captions region is visible.")
             
-            # --- IMPROVED JAVASCRIPT FOR SPEAKER/CAPTION SCRAPING ---
+            # --- REWRITTEN JAVASCRIPT FOR ACCURATE SPEAKER SCRAPING ---
             js_code = """
             () => {
                 const targetNode = document.body;
-                const config = { childList: true, subtree: true, characterData: true };
+                const config = { childList: true, subtree: true };
                 let lastSpeaker = 'Unknown Speaker';
-                // This selector is crucial for identifying the speaker's name badge.
-                const speakerBadgeSelector = '[data-self-name="You"] > div, .xt3V2d';
-
-                const handleNode = (node) => {
-                    if (typeof node.querySelector !== 'function') return;
-                    
-                    const speakerElement = node.querySelector(speakerBadgeSelector);
-                    if (speakerElement && speakerElement.textContent) {
-                         lastSpeaker = speakerElement.textContent.trim();
-                    }
-                    
-                    const clone = node.cloneNode(true);
-                    const speakerLabelInClone = clone.querySelector(speakerBadgeSelector);
-                    if (speakerLabelInClone) speakerLabelInClone.remove();
-
-                    // This selector targets the actual caption text spans.
-                    const captionSpans = clone.querySelectorAll('span[jsname="YSxPC"]');
-                    if (captionSpans.length > 0) {
-                        for (const span of captionSpans) {
-                            const captionText = span.textContent?.trim() || "";
-                             if (captionText && captionText.toLowerCase() !== lastSpeaker.toLowerCase()) {
-                                window.on_caption(lastSpeaker, captionText);
-                            }
-                        }
-                    } else { // Fallback for other text content
-                        const fallbackText = clone.textContent?.trim() || "";
-                         if (fallbackText && fallbackText.toLowerCase() !== lastSpeaker.toLowerCase()) {
-                            window.on_caption(lastSpeaker, fallbackText);
-                        }
-                    }
-                };
 
                 const observer = new MutationObserver((mutationsList) => {
                     for (const mutation of mutationsList) {
-                        if (mutation.type === 'childList') {
-                            mutation.addedNodes.forEach(node => {
-                                if (node.nodeType === 1) { handleNode(node); }
+                        mutation.addedNodes.forEach(node => {
+                            if (node.nodeType !== 1) return; // Not an element node
+
+                            // Find all caption containers within the added node
+                            const containers = node.querySelectorAll('div.iTTPOb.VbkSUe');
+                            if (containers.length === 0 && node.matches('div.iTTPOb.VbkSUe')) {
+                                // The added node itself is a container
+                                containers = [node];
+                            }
+
+                            containers.forEach(container => {
+                                try {
+                                    const speakerElement = container.querySelector('div.zs7s8d.jxF_2d');
+                                    const speakerName = speakerElement ? speakerElement.innerText.trim() : lastSpeaker;
+                                    lastSpeaker = speakerName;
+
+                                    const captionElement = container.querySelector('span[jsname="YSxPC"]');
+                                    if (captionElement && captionElement.innerText) {
+                                        const captionText = captionElement.innerText.trim();
+                                        if (captionText) {
+                                            window.on_caption(speakerName, captionText);
+                                        }
+                                    }
+                                } catch (e) {
+                                    console.error('Error processing caption block:', e);
+                                }
                             });
-                        } else if (mutation.type === 'characterData' && mutation.target.parentElement) {
-                            handleNode(mutation.target.parentElement);
-                        }
+                        });
                     }
                 });
                 observer.observe(targetNode, config);
-                console.log('✅ Advanced Caption Observer injected and running.');
+                console.log('✅ Accurate Speaker Caption Observer injected and running.');
             }
             """
             await page.evaluate(js_code)
 
-            print("Bot is in the meeting. Monitoring for exit conditions...")
+            print("Bot is in the meeting. Monitoring participant count...")
             start_time = time.time()
-            IDLE_TIMEOUT_SECONDS = 300 # 5 minutes
             
             while time.time() - start_time < max_duration:
-                # --- NEW: EXIT CONDITION CHECKS ---
-                # Check 1: Did everyone leave?
-                if await page.locator('text="No one else is here"').is_visible():
-                    print("👋 Everyone left the meeting. Exiting.")
-                    break
-                # Check 2: Did we get kicked out or leave manually?
-                if await page.locator('text=/You left the meeting|You\'ve been removed/').is_visible():
-                    print("👋 Bot has left the meeting. Exiting.")
-                    break
-                # Check 3: Has it been too long since the last caption?
-                if time.time() - last_caption_time > IDLE_TIMEOUT_SECONDS:
-                    print(f"🕒 No new captions for {IDLE_TIMEOUT_SECONDS} seconds. Exiting.")
+                # --- NEW: RELIABLE PARTICIPANT COUNT EXIT CONDITION ---
+                try:
+                    participant_button = page.get_by_role("button", name=re.compile(r"Participants|Show everyone", re.IGNORECASE))
+                    # The participant count is in the aria-label or inner text
+                    button_text = await participant_button.inner_text()
+                    match = re.search(r'\d+', button_text)
+                    if match:
+                        participant_count = int(match.group())
+                        print(f"[{participant_count}] participants in the meeting.")
+                        if participant_count <= 1:
+                            print("👋 Only 1 participant (the bot) is left. Exiting.")
+                            break
+                    else:
+                        # Fallback if number not found in text, might indicate meeting ended
+                        print("Could not determine participant count from button. Assuming meeting ended.")
+                        break
+                except (TimeoutError, AttributeError):
+                    print("❌ Could not find participant count button. Assuming meeting has ended.")
                     break
                 
-                await asyncio.sleep(10) # Check every 10 seconds
+                await asyncio.sleep(15) # Check every 15 seconds
 
         except Exception as e:
             print(f"An error occurred: {e}")
