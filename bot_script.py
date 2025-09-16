@@ -103,6 +103,17 @@ async def join_and_record_meeting(url: str, max_duration: int):
             await join_button_locator.click(timeout=15000)
             print("Successfully joined or requested to join.")
             
+            # --- NEW: CLOSE THE INITIAL POP-UP ---
+            try:
+                # Ищем кнопку "Got it" и нажимаем на нее, чтобы закрыть окно
+                got_it_button = page.get_by_role("button", name="Got it")
+                await got_it_button.wait_for(timeout=15000) # Ждем появления кнопки
+                await got_it_button.click()
+                print("✅ Closed the initial pop-up window.")
+            except TimeoutError:
+                # Если окно не появилось за 15 секунд, просто продолжаем
+                print("Initial pop-up not found, continuing...")
+
             # --- ENABLE CAPTIONS ---
             try:
                 captions_button = page.get_by_role("button", name="Turn on captions")
