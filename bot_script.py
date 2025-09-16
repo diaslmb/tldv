@@ -165,24 +165,45 @@ async def join_and_record_meeting(url: str, max_duration: int):
                 print(f"📸 Screenshot saved to {screenshot_path}.")
 
             # --- DYNAMIC RECORDING AND CAPTION SCRAPING LOGIC ---
+            # --- DYNAMIC RECORDING AND CAPTION SCRAPING LOGIC ---
             print("Bot is now in the meeting. Monitoring participant count and scraping captions...")
             check_interval_seconds = 5
+            seen_captions = set() # Множество для хранения уже увиденных субтитров
+
             while True:
                 await asyncio.sleep(check_interval_seconds)
                 try:
-                    # --- SCRAPE CAPTIONS ---
-                    caption_elements = await page.query_selector_all('[data-self-name] >> xpath=..')
-                    for element in caption_elements:
-                        speaker = await element.get_attribute('data-self-name')
-                        caption = await element.inner_text()
-                        if caption:
-                            captions_data.append({"speaker": speaker, "caption": caption, "timestamp": asyncio.get_event_loop().time()})
-                            print(f"[{speaker}]: {caption}")
+                    # --- NEW, MORE RELIABLE CAPTION SCRAPING ---
+                    # Находим все контейнеры с субтитрами
+                    caption_containers = await page.query_selector_all("div.iTTPOb.VbkSUe")
+                    
+                    for container in caption_containers:
+                        try:
+                            # Извлекаем имя говорящего
+                            speaker_element = await container.query_selector("div.zs7s8d.jxF_2d")
+                            speaker_name = await speaker_element.inner_text() if speaker_element else "Unknown"
+                            
+                            # Извлекаем текст субтитров
+                            caption_text_element = await container.query_selector("span[jsname='YSxPC']")
+                            caption_text = await caption_text_element.inner_text() if caption_text_element else ""
+
+                            # Создаем уникальный ключ для субтитра, чтобы избежать дубликатов
+                            caption_key = f"{speaker_name}:{caption_text}"
+
+                            if caption_text and caption_key not in seen_captions:
+                                timestamp = asyncio.get_event_loop().time()
+                                captions_data.append({"speaker": speaker_name, "caption": caption_text, "timestamp": timestamp})
+                                seen_captions.add(caption_key)
+                                print(f"CAPTURED: [{speaker_name}] {caption_text}")
+
+                        except Exception as e:
+                            # Ошибка при обработке одного блока субтитров, но цикл продолжается
+                            print(f"Could not process a caption block: {e}")
 
                     # --- MONITOR PARTICIPANTS ---
                     participant_button = page.get_by_role("button", name=re.compile(r"Participants|Show everyone"))
                     participant_count_text = await participant_button.inner_text()
-                    participant_count = int(re.search(r'\d+', participant_count_text).group())
+                    participant_count = int(re.search(r'\d+', participant_ttext).group())
 
                     print(f"[{participant_count}] participants in the meeting.")
                     
