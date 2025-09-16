@@ -6,10 +6,10 @@ import subprocess
 from playwright.async_api import async_playwright, TimeoutError
 import json
 import time
+import requests # <-- FIXED: Added the missing import
 
 # --- CONFIGURATION ---
 MEETING_URL = sys.argv[1] if len(sys.argv) > 1 else ""
-# Set a long duration; the bot will stay until this time limit is reached or the process is stopped.
 MAX_MEETING_DURATION_SECONDS = 10800  # 3 hours
 OUTPUT_FILENAME = "meeting_audio.wav"
 CAPTIONS_FILENAME = "captions.json"
@@ -59,12 +59,9 @@ async def join_and_record_meeting(url: str, max_duration: int):
         recorder = None
         captions_data = []
 
-        # This function will be called from the browser's JS context
         async def on_caption(speaker, text):
-            # The JS observer can sometimes send rapid duplicates, this helps clean it.
             if captions_data and captions_data[-1]["caption"] == text and captions_data[-1]["speaker"] == speaker:
                 return
-            
             timestamp = time.time()
             print(f"CAPTURED: [{speaker}] {text}")
             captions_data.append({"speaker": speaker, "caption": text, "timestamp": timestamp})
@@ -77,7 +74,6 @@ async def join_and_record_meeting(url: str, max_duration: int):
             print("Entering a name...")
             await page.locator('input[placeholder="Your name"]').fill("NoteTaker Bot")
 
-            # Mute mic and turn off camera before joining
             await page.get_by_role("button", name=re.compile("Turn off microphone", re.IGNORECASE)).click(timeout=10000)
             print("🎤 Microphone turned off before joining.")
             await page.get_by_role("button", name=re.compile("Turn off camera", re.IGNORECASE)).click(timeout=10000)
@@ -94,75 +90,66 @@ async def join_and_record_meeting(url: str, max_duration: int):
             await join_button_locator.click(timeout=15000)
             print("Successfully joined or requested to join.")
             
-            # Wait until we are in the call
             await page.wait_for_selector('button[aria-label*="Leave call"]', timeout=60000)
             print("✅ In the meeting.")
 
-            # Dismiss any initial pop-ups
             got_it_button = page.get_by_role("button", name="Got it")
-            if await got_it_button.is_visible():
+            if await got_it_button.is_visible(timeout=5000):
                 await got_it_button.click()
                 print("✅ Closed the 'Got it' pop-up window.")
 
-            # --- ROBUST CAPTION ACTIVATION ---
+            # --- FIXED: ROBUST CAPTION ACTIVATION ---
             print("Trying to turn on captions...")
-            await page.get_by_role("button", name="More options").click()
-            await page.get_by_role("menuitem", name=re.compile("Captions|Turn on captions", re.IGNORECASE)).click()
-            # Select the language if prompted
             try:
-                await page.get_by_role("button", name="English").click(timeout=5000)
+                # First, try to find the main CC button on the control bar
+                captions_button = page.get_by_role("button", name=re.compile("Turn on captions", re.IGNORECASE))
+                await captions_button.click(timeout=15000)
+                print("✅ Clicked the main 'Turn on captions' (CC) button.")
             except TimeoutError:
-                pass # Language was likely already set
-            
+                print("⚠️ Main CC button not found. Will try activating via menu as a fallback.")
+                try:
+                    await page.get_by_role("button", name="More options").click()
+                    await page.get_by_role("menuitem", name=re.compile("Captions|Turn on captions", re.IGNORECASE)).click()
+                except Exception as e:
+                    raise Exception(f"Could not enable captions via button or menu. Captions may be disabled for this meeting. Error: {e}")
+
             print("Waiting for captions to appear...")
             await page.wait_for_selector('[role="region"][aria-label*="Captions"]', timeout=20000)
             print("✅ Captions region is visible.")
             
-            # --- INJECT ADVANCED JAVASCRIPT TO OBSERVE CAPTIONS ---
             js_code = """
             () => {
                 const targetNode = document.body;
                 const config = { childList: true, subtree: true, characterData: true };
-
                 let lastSpeaker = 'Unknown Speaker';
-                // More specific selector for the speaker's name badge
                 const speakerBadgeSelector = '.NWpY1d, .xoMHSc';
 
                 const handleNode = (node) => {
+                    if (typeof node.querySelector !== 'function') return;
                     const speakerElement = node.querySelector(speakerBadgeSelector);
                     let speaker = speakerElement ? speakerElement.textContent.trim() : lastSpeaker;
                     if (speaker !== 'Unknown Speaker') {
                         lastSpeaker = speaker;
                     }
-
-                    // Clone the node to avoid modifying the live DOM
                     const clone = node.cloneNode(true);
-                    // Remove the speaker badge from the clone to isolate caption text
                     const speakerLabelInClone = clone.querySelector(speakerBadgeSelector);
                     if (speakerLabelInClone) speakerLabelInClone.remove();
-
                     const captionText = clone.textContent?.trim() || "";
-
                     if (captionText && captionText.toLowerCase() !== speaker.toLowerCase()) {
-                        // Call the function exposed from Playwright/Python
                         window.on_caption(speaker, captionText);
                     }
                 };
-
                 const observer = new MutationObserver((mutationsList) => {
                     for (const mutation of mutationsList) {
                         if (mutation.type === 'childList') {
                             mutation.addedNodes.forEach(node => {
-                                if (node.nodeType === 1) { // ELEMENT_NODE
-                                   handleNode(node);
-                                }
+                                if (node.nodeType === 1) { handleNode(node); }
                             });
                         } else if (mutation.type === 'characterData' && mutation.target.parentElement) {
                             handleNode(mutation.target.parentElement);
                         }
                     }
                 });
-
                 observer.observe(targetNode, config);
                 console.log('✅ Advanced Caption Observer injected and running.');
             }
@@ -170,7 +157,7 @@ async def join_and_record_meeting(url: str, max_duration: int):
             await page.evaluate(js_code)
 
             print(f"Bot is now in the meeting and will run for {max_duration} seconds.")
-            await asyncio.sleep(max_duration) # Keep the script running
+            await asyncio.sleep(max_duration)
 
         except Exception as e:
             print(f"An error occurred: {e}")
@@ -181,7 +168,7 @@ async def join_and_record_meeting(url: str, max_duration: int):
             if recorder and recorder.poll() is None:
                 print("Terminating audio recording...")
                 recorder.terminate()
-                await asyncio.sleep(2) # Give it a moment to finalize the file
+                await asyncio.sleep(2)
                 
             if os.path.exists(OUTPUT_FILENAME) and os.path.getsize(OUTPUT_FILENAME) > 0:
                 print(f"✅ Audio recording successful. File saved to {OUTPUT_FILENAME}")
