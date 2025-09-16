@@ -115,21 +115,35 @@ async def join_and_record_meeting(url: str, max_duration: int):
 
             # --- DISABLE CAMERA ---
             try:
-                camera_button = page.get_by_role("button", name="Turn off camera")
-                await camera_button.wait_for(timeout=10000)
-                await camera_button.click()
-                print("📸 Camera turned off.")
+                # Используем регулярное выражение для поиска кнопки, которое сработает для
+                # "Turn off camera", "Выключить камеру" и других вариаций.
+                camera_button = page.get_by_role("button", name=re.compile("camera", re.IGNORECASE))
+                
+                # Проверяем, включена ли камера, по атрибуту aria-label
+                aria_label = await camera_button.get_attribute("aria-label")
+                if "off" not in aria_label.lower() and "выключить" not in aria_label.lower():
+                     print("Камера уже выключена или кнопка не найдена в нужном состоянии.")
+                else:
+                    await camera_button.click()
+                    print("📸 Camera turned off.")
+
             except TimeoutError:
-                print("Could not find 'Turn off camera' button, or camera was already off.")
+                print("Could not find camera button or it was already off.")
             
-            # --- NEW: DISABLE MICROPHONE ---
+            # --- DISABLE MICROPHONE ---
             try:
-                mic_button = page.get_by_role("button", name="Turn off microphone")
-                await mic_button.wait_for(timeout=10000)
-                await mic_button.click()
-                print("🎤 Microphone turned off.")
+                # Аналогично для микрофона
+                mic_button = page.get_by_role("button", name=re.compile("microphone", re.IGNORECASE))
+
+                # Проверяем, включен ли микрофон
+                aria_label = await mic_button.get_attribute("aria-label")
+                if "off" not in aria_label.lower() and "выключить" not in aria_label.lower():
+                    print("Микрофон уже выключен или кнопка не найдена в нужном состоянии.")
+                else:
+                    await mic_button.click()
+                    print("🎤 Microphone turned off.")
             except TimeoutError:
-                print("Could not find 'Turn off microphone' button, or it was already off.")
+                print("Could not find microphone button or it was already off.")
 
             # --- DYNAMIC RECORDING AND CAPTION SCRAPING LOGIC ---
             print("Bot is now in the meeting. Monitoring participant count and scraping captions...")
