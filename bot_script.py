@@ -348,14 +348,16 @@ async def join_and_record_meeting(url: str, max_duration: int):
                 await asyncio.sleep(check_interval_seconds)
                 try:
                     # Try multiple caption selectors (Google Meet changes frequently)
+                    # More specific selectors for actual captions, not UI elements
                     caption_selectors = [
                         "div.iTTPOb.VbkSUe",  # Original selector
-                        "[data-caption-text]",  # Possible data attribute
-                        ".caption-text",  # Generic class
-                        "[role='log'] div",  # Accessibility role
-                        ".captions-text",  # Alternative class
-                        "div[jsname] span",  # Generic js element with span
-                        ".live-caption",  # Live caption class
+                        "[data-is-caption='true']",  # Data attribute for captions
+                        "[aria-live='polite'] div",  # Live region for captions
+                        "[role='log'] > div",  # Direct children of log role
+                        "div[data-self-name] + div",  # Adjacent to participant info
+                        ".TBMuR.bj4p3b",  # Caption container class (newer)
+                        "div[jsname='dsyhDe']",  # Specific jsname for captions
+                        "div[jsname='r4nke']",  # Alternative jsname
                     ]
                     
                     captions_found = False
@@ -406,16 +408,328 @@ async def join_and_record_meeting(url: str, max_duration: int):
                                                 pass
                                         
                                         if caption_text and len(caption_text) > 3:  # Minimum length filter
-                                            caption_key = f"{speaker_name}:{caption_text}"
-                                            if caption_key not in seen_captions:
-                                                timestamp = asyncio.get_event_loop().time()
-                                                captions_data.append({
-                                                    "speaker": speaker_name, 
-                                                    "caption": caption_text, 
-                                                    "timestamp": timestamp
-                                                })
-                                                seen_captions.add(caption_key)
-                                                print(f"CAPTURED: [{speaker_name}] {caption_text}")
+                                            # Filter out UI elements and noise
+                                            ui_noise = [
+                                                # Language options
+                                                "afrikaans", "albanian", "amharic", "arabic", "armenian", "azerbaijani",
+                                                "basque", "bengali", "bulgarian", "burmese", "catalan", "chinese",
+                                                "czech", "dutch", "english", "estonian", "filipino", "finnish",
+                                                "french", "galician", "georgian", "german", "greek", "gujarati",
+                                                "hebrew", "hindi", "hungarian", "icelandic", "indonesian", "italian",
+                                                "japanese", "javanese", "kannada", "kazakh", "khmer", "kinyarwanda",
+                                                "korean", "lao", "latvian", "lithuanian", "macedonian", "malay",
+                                                "malayalam", "marathi", "mongolian", "nepali", "northern sotho",
+                                                "norwegian", "persian", "polish", "portuguese", "romanian", "russian",
+                                                "serbian", "sesotho", "sinhala", "slovak", "slovenian", "spanish",
+                                                "sundanese", "swahili", "swati", "swedish", "tamil", "telugu",
+                                                "thai", "tshivenda", "tswana", "turkish", "ukrainian", "urdu",
+                                                "uzbek", "vietnamese", "xhosa", "xitsonga", "zulu", "beta",
+                                                # Font options
+                                                "font size", "font color", "default", "tiny", "small", "medium",
+                                                "large", "huge", "jumbo", "white", "black", "blue", "green",
+                                                "yellow", "cyan", "magenta",
+                                                # UI elements
+                                                "turn on microphone", "turn off microphone", "turn on camera",
+                                                "turn off camera", "share screen", "leave call", "meeting details",
+                                                "chat with everyone", "meeting tools", "people", "backgrounds and effects",
+                                                "show in a tile", "more options", "reactions aren't available",
+                                                "raise hand", "turn on captions", "turn off captions", "open caption settings",
+                                                "audio settings", "video settings", "gemini isn't taking notes",
+                                                "developing an extension", "people have joined by phone",
+                                                "people outside the host's organization", "rooms can also contain visitors",
+                                                # Material Design icons
+                                                "visual_effects", "more_vert", "format_size", "circle", "settings",
+                                                "keyboard_arrow_up", "mic_off", "videocam_off", "computer_arrow_up",
+                                                "mood", "closed_caption", "back_hand", "call_end", "info", "people",
+                                                "chat", "pen_spark_io25", "domain_disabled"
+                                            ]
+                                            
+                                            # Convert to lowercase for comparison
+                                            caption_lower = caption_text.lower().strip()
+                                            speaker_lower = speaker_name.lower().strip()
+                                            
+                                            # Check if this is UI noise
+                                            is_ui_noise = False
+                                            
+                                            # Check against known UI text
+                                            for noise in ui_noise:
+                                                if noise in caption_lower:
+                                                    is_ui_noise = True
+                                                    break
+                                            
+                                            # Check for pure icon names (single words with underscores)
+                                            if "_" in speaker_name and " " not in speaker_name:
+                                                is_ui_noise = True
+                                            
+                                            # Check for time stamps
+                                            if re.match(r'^\d{1,2}:\d{2}
+                                                
+                                    except Exception as e:
+                                        print(f"Could not process a caption container: {e}")
+                                break  # Found captions with this selector, no need to try others
+                        except Exception as e:
+                            continue  # Try next selector
+                    
+                    if not captions_found:
+                        # Try to find live captions area more specifically
+                        print("🔍 Looking for live captions area...")
+                        try:
+                            # Look for elements that might contain live captions
+                            potential_caption_areas = await page.query_selector_all([
+                                "[aria-live]",  # Live regions
+                                "[role='log']",  # Log regions
+                                "div[data-allocation-index]",  # Meeting content areas
+                                ".U26fgb.mUbCce",  # Google Meet content containers
+                            ])
+                            
+                            for area in potential_caption_areas:
+                                area_text = await area.inner_text()
+                                if area_text and len(area_text) > 20:  # Has substantial content
+                                    # Check if this contains participant names we know
+                                    if "Dias Ilyas" in area_text or "NoteTaker Bot" in area_text:
+                                        print(f"📝 Found potential caption area with text: {area_text[:200]}...")
+                                        
+                                        # Try to extract captions from this area
+                                        nested_elements = await area.query_selector_all("div, span, p")
+                                        for element in nested_elements:
+                                            element_text = await element.inner_text()
+                                            if element_text and len(element_text.strip()) > 5:
+                                                # Try to detect if this looks like a caption
+                                                # (contains actual words, not just UI text)
+                                                words = element_text.split()
+                                                if len(words) >= 2 and not any(ui in element_text.lower() for ui in ["turn on", "turn off", "settings", "options"]):
+                                                    print(f"🎯 Potential live caption: {element_text}")
+                                                    
+                        except Exception as e:
+                            print(f"Error searching for caption areas: {e}")
+
+                    # Check participant count with multiple selectors
+                    participant_selectors = [
+                        "button[aria-label*='participant']",
+                        "button[aria-label*='Show everyone']",
+                        "button[data-tooltip*='participant']",
+                        "button[title*='participant']",
+                        "[role='button']:has-text('participant')",
+                        "div[data-participant-count]",
+                    ]
+                    
+                    participant_found = False
+                    for p_selector in participant_selectors:
+                        try:
+                            if "has-text" in p_selector:
+                                # Handle Playwright text selector
+                                participant_elements = await page.query_selector_all("button")
+                                for btn in participant_elements:
+                                    btn_text = await btn.inner_text()
+                                    if "participant" in btn_text.lower():
+                                        match = re.search(r'\d+', btn_text)
+                                        if match:
+                                            participant_count = int(match.group())
+                                            print(f"[{participant_count}] participants in the meeting.")
+                                            participant_found = True
+                                            consecutive_no_participants = 0
+                                            if participant_count <= 1:
+                                                print("Only 1 participant left. Ending the recording.")
+                                                return  # Exit the function to end recording
+                                            break
+                            else:
+                                participant_button = await page.query_selector(p_selector)
+                                if participant_button:
+                                    participant_count_text = await participant_button.inner_text()
+                                    match = re.search(r'\d+', participant_count_text)
+                                    if match:
+                                        participant_count = int(match.group())
+                                        print(f"[{participant_count}] participants in the meeting.")
+                                        participant_found = True
+                                        consecutive_no_participants = 0
+                                        if participant_count <= 1:
+                                            print("Only 1 participant left. Ending the recording.")
+                                            return  # Exit the function to end recording
+                                        break
+                        except:
+                            continue
+                    
+                    if not participant_found:
+                        consecutive_no_participants += 1
+                        print(f"Could not find participant count ({consecutive_no_participants}/{max_no_participants}). Continuing...")
+                        if consecutive_no_participants >= max_no_participants:
+                            print("Multiple failures to find participant count. Assuming meeting has ended.")
+                            break
+                        
+                except Exception as e:
+                    print(f"An unexpected error occurred while monitoring meeting: {e}")
+                    consecutive_no_participants += 1
+                    if consecutive_no_participants >= max_no_participants:
+                        print("Too many consecutive errors. Ending recording.")
+                        break
+                    
+        except Exception as e:
+            print(f"An error occurred during setup or joining: {e}")
+            await page.screenshot(path="debug_screenshot.png")
+            print("📸 Screenshot saved to debug_screenshot.png.")
+        finally:
+            print("Cleaning up...")
+            if recorder and recorder.poll() is None:
+                recorder.terminate()
+                stdout, stderr = recorder.communicate()
+                if os.path.exists(OUTPUT_FILENAME) and os.path.getsize(OUTPUT_FILENAME) > 0:
+                    print(f"✅ Audio recording successful. File saved to {OUTPUT_FILENAME}")
+                    # Enhanced transcription with speaker mapping
+                    transcribe_and_map_speakers(OUTPUT_FILENAME, captions_data)
+                else:
+                    print(f"❌ Recording failed or was empty.\n--- FFmpeg Error Output ---\n{stderr.decode('utf-8', 'ignore')}\n-----------------------------")
+            
+            # Save captions data
+            if captions_data:
+                with open(CAPTIONS_FILENAME, 'w', encoding='utf-8') as f:
+                    json.dump(captions_data, f, indent=4, ensure_ascii=False)
+                print(f"✅ Captions saved to {CAPTIONS_FILENAME}")
+            
+            await browser.close()
+            print("Browser closed.")
+
+if __name__ == "__main__":
+    if not MEETING_URL:
+        print("Error: Please provide a meeting URL as a command-line argument.")
+        sys.exit(1)
+    asyncio.run(join_and_record_meeting(MEETING_URL, MAX_MEETING_DURATION_SECONDS)), caption_text.strip()):
+                                                is_ui_noise = True
+                                            
+                                            # Check for meeting IDs
+                                            if re.match(r'^[a-z]{3}-[a-z]{4}-[a-z]{3}
+                                                
+                                    except Exception as e:
+                                        print(f"Could not process a caption container: {e}")
+                                break  # Found captions with this selector, no need to try others
+                        except Exception as e:
+                            continue  # Try next selector
+                    
+                    if not captions_found:
+                        print("🔍 No captions found with any selector. Checking page content...")
+                        # Debug: Print some page content to see what's available
+                        try:
+                            page_content = await page.content()
+                            if "iTTPOb" in page_content:
+                                print("📝 Found iTTPOb in page content - captions may be present")
+                            if "caption" in page_content.lower():
+                                print("📝 Found 'caption' text in page content")
+                        except:
+                            pass
+
+                    # Check participant count with multiple selectors
+                    participant_selectors = [
+                        "button[aria-label*='participant']",
+                        "button[aria-label*='Show everyone']",
+                        "button[data-tooltip*='participant']",
+                        "button[title*='participant']",
+                        "[role='button']:has-text('participant')",
+                        "div[data-participant-count]",
+                    ]
+                    
+                    participant_found = False
+                    for p_selector in participant_selectors:
+                        try:
+                            if "has-text" in p_selector:
+                                # Handle Playwright text selector
+                                participant_elements = await page.query_selector_all("button")
+                                for btn in participant_elements:
+                                    btn_text = await btn.inner_text()
+                                    if "participant" in btn_text.lower():
+                                        match = re.search(r'\d+', btn_text)
+                                        if match:
+                                            participant_count = int(match.group())
+                                            print(f"[{participant_count}] participants in the meeting.")
+                                            participant_found = True
+                                            consecutive_no_participants = 0
+                                            if participant_count <= 1:
+                                                print("Only 1 participant left. Ending the recording.")
+                                                return  # Exit the function to end recording
+                                            break
+                            else:
+                                participant_button = await page.query_selector(p_selector)
+                                if participant_button:
+                                    participant_count_text = await participant_button.inner_text()
+                                    match = re.search(r'\d+', participant_count_text)
+                                    if match:
+                                        participant_count = int(match.group())
+                                        print(f"[{participant_count}] participants in the meeting.")
+                                        participant_found = True
+                                        consecutive_no_participants = 0
+                                        if participant_count <= 1:
+                                            print("Only 1 participant left. Ending the recording.")
+                                            return  # Exit the function to end recording
+                                        break
+                        except:
+                            continue
+                    
+                    if not participant_found:
+                        consecutive_no_participants += 1
+                        print(f"Could not find participant count ({consecutive_no_participants}/{max_no_participants}). Continuing...")
+                        if consecutive_no_participants >= max_no_participants:
+                            print("Multiple failures to find participant count. Assuming meeting has ended.")
+                            break
+                        
+                except Exception as e:
+                    print(f"An unexpected error occurred while monitoring meeting: {e}")
+                    consecutive_no_participants += 1
+                    if consecutive_no_participants >= max_no_participants:
+                        print("Too many consecutive errors. Ending recording.")
+                        break
+                    
+        except Exception as e:
+            print(f"An error occurred during setup or joining: {e}")
+            await page.screenshot(path="debug_screenshot.png")
+            print("📸 Screenshot saved to debug_screenshot.png.")
+        finally:
+            print("Cleaning up...")
+            if recorder and recorder.poll() is None:
+                recorder.terminate()
+                stdout, stderr = recorder.communicate()
+                if os.path.exists(OUTPUT_FILENAME) and os.path.getsize(OUTPUT_FILENAME) > 0:
+                    print(f"✅ Audio recording successful. File saved to {OUTPUT_FILENAME}")
+                    # Enhanced transcription with speaker mapping
+                    transcribe_and_map_speakers(OUTPUT_FILENAME, captions_data)
+                else:
+                    print(f"❌ Recording failed or was empty.\n--- FFmpeg Error Output ---\n{stderr.decode('utf-8', 'ignore')}\n-----------------------------")
+            
+            # Save captions data
+            if captions_data:
+                with open(CAPTIONS_FILENAME, 'w', encoding='utf-8') as f:
+                    json.dump(captions_data, f, indent=4, ensure_ascii=False)
+                print(f"✅ Captions saved to {CAPTIONS_FILENAME}")
+            
+            await browser.close()
+            print("Browser closed.")
+
+if __name__ == "__main__":
+    if not MEETING_URL:
+        print("Error: Please provide a meeting URL as a command-line argument.")
+        sys.exit(1)
+    asyncio.run(join_and_record_meeting(MEETING_URL, MAX_MEETING_DURATION_SECONDS)), caption_text.strip()):
+                                                is_ui_noise = True
+                                            
+                                            # Check for very short single words (likely UI elements)
+                                            if len(caption_text.strip()) < 10 and " " not in caption_text.strip():
+                                                is_ui_noise = True
+                                            
+                                            # Check for URLs
+                                            if "http" in caption_lower or "developers.google.com" in caption_lower:
+                                                is_ui_noise = True
+                                            
+                                            # Only process if not UI noise
+                                            if not is_ui_noise:
+                                                caption_key = f"{speaker_name}:{caption_text}"
+                                                if caption_key not in seen_captions:
+                                                    timestamp = asyncio.get_event_loop().time()
+                                                    captions_data.append({
+                                                        "speaker": speaker_name, 
+                                                        "caption": caption_text, 
+                                                        "timestamp": timestamp
+                                                    })
+                                                    seen_captions.add(caption_key)
+                                                    print(f"CAPTURED: [{speaker_name}] {caption_text}")
+                                            else:
+                                                print(f"FILTERED UI: [{speaker_name}] {caption_text}")
                                                 
                                     except Exception as e:
                                         print(f"Could not process a caption container: {e}")
