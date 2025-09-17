@@ -5,12 +5,11 @@ import asyncio
 import subprocess
 from playwright.async_api import async_playwright, TimeoutError
 import json
-import time
 import requests
 
 # --- CONFIGURATION ---
 MEETING_URL = sys.argv[1] if len(sys.argv) > 1 else ""
-MAX_MEETING_DURATION_SECONDS = 10800  # 3 hours
+MAX_MEETING_DURATION_SECONDS = 10800
 OUTPUT_FILENAME = "meeting_audio.wav"
 CAPTIONS_FILENAME = "captions.json"
 TRANSCRIPT_FILENAME = "transcript.txt"
@@ -35,7 +34,7 @@ def transcribe_audio(audio_path):
         if response.status_code == 200:
             transcript_data = response.json()
             clean_transcript = transcript_data.get('text', '').replace('<br>', '\n')
-            with open(TRANSCRIPT_FILENAME, 'w', encoding='utf-8') as f:
+            with open(TRANSCRIPT_FILENAME, 'w') as f:
                 f.write(clean_transcript)
             print(f"✅ Transcription successful. Saved to {TRANSCRIPT_FILENAME}")
         else:
@@ -58,158 +57,113 @@ async def join_and_record_meeting(url: str, max_duration: int):
         page = await context.new_page()
         recorder = None
         captions_data = []
-        seen_captions = set()
-        last_caption_time = time.time()
-
-        async def on_caption(speaker, text):
-            nonlocal last_caption_time
-            caption_key = f"{speaker}:{text}"
-            if caption_key in seen_captions: return
-            
-            timestamp = time.time()
-            last_caption_time = timestamp # Update the time of the last seen caption
-            print(f"CAPTURED: [{speaker}] {text}")
-            captions_data.append({"speaker": speaker, "caption": text, "timestamp": timestamp})
-            seen_captions.add(caption_key)
-
-        await context.expose_function("on_caption", on_caption)
 
         try:
             print(f"Navigating to {url}...")
-            await page.goto(url, timeout=90000)
+            await page.goto(url, timeout=60000)
             print("Entering a name...")
             await page.locator('input[placeholder="Your name"]').fill("NoteTaker Bot")
 
-            await page.get_by_role("button", name=re.compile("Turn off microphone", re.IGNORECASE)).click(timeout=10000)
-            print("🎤 Microphone turned off before joining.")
-            await page.get_by_role("button", name=re.compile("Turn off camera", re.IGNORECASE)).click(timeout=10000)
-            print("📸 Camera turned off before joining.")
+            # --- Turn off mic and camera BEFORE joining ---
+            try:
+                await page.get_by_role("button", name="Turn off microphone").click(timeout=10000)
+                print("🎤 Microphone turned off before joining.")
+            except Exception:
+                print("Could not turn off microphone before joining.")
+            try:
+                await page.get_by_role("button", name="Turn off camera").click(timeout=10000)
+                print("📸 Camera turned off before joining.")
+            except Exception:
+                print("Could not turn off camera before joining.")
 
-            join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join", re.IGNORECASE))
+            join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
             print("Waiting for the join button...")
-            await join_button_locator.wait_for(timeout=30000)
-
+            await join_button_locator.wait_for(timeout=15000)
+            
             print(f"Starting recording for a maximum of {max_duration / 3600:.1f} hours...")
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
+            
             print("Clicking the join button...")
             await join_button_locator.click(timeout=15000)
             print("Successfully joined or requested to join.")
 
-            await page.wait_for_selector('button[aria-label*="Leave call"]', timeout=60000)
-            print("✅ In the meeting.")
+            try:
+                await page.get_by_role("button", name="Got it").click(timeout=15000)
+                print("✅ Closed the initial pop-up window.")
+            except TimeoutError:
+                print("Initial pop-up not found, continuing...")
 
-            print("Trying to turn on captions...")
-            captions_button = page.get_by_role("button", name=re.compile("Turn on captions", re.IGNORECASE))
-            await captions_button.click(timeout=15000)
-            print("✅ Clicked the 'Turn on captions' (CC) button.")
-
-            print("Waiting for captions to appear...")
-            await page.wait_for_selector('[role="region"][aria-label*="Captions"]', timeout=20000)
-            print("✅ Captions region is visible.")
-
-            # --- FINAL, MOST ROBUST JAVASCRIPT SCRAPER ---
-            js_code = """
-            () => {
-                const captionRegion = document.querySelector('[role="region"][aria-label*="Captions"]');
-                if (!captionRegion) {
-                    console.error('Could not find caption region to observe.');
-                    return;
-                }
-
-                const config = { childList: true, subtree: true };
-                let lastKnownSpeaker = 'Unknown Speaker';
-
-                const processNode = (node) => {
-                    if (node.nodeType !== 1) return; // Not an element
-
-                    // The speaker is often in the first div with text content
-                    const speakerElement = node.querySelector('div');
-                    if (speakerElement && speakerElement.textContent) {
-                        lastKnownSpeaker = speakerElement.textContent.trim();
-                    }
-
-                    // The caption text is usually in one or more spans
-                    const captionSpans = node.querySelectorAll('span');
-                    let fullCaption = '';
-                    if (captionSpans.length > 0) {
-                        captionSpans.forEach(span => {
-                            fullCaption += span.textContent + ' ';
-                        });
-                    } else {
-                        // Fallback if no spans are found
-                        fullCaption = node.textContent.replace(lastKnownSpeaker, '').trim();
-                    }
-
-                    fullCaption = fullCaption.trim();
-                    if (fullCaption) {
-                        window.on_caption(lastKnownSpeaker, fullCaption);
-                    }
-                };
-
-                const observer = new MutationObserver((mutationsList) => {
-                    for (const mutation of mutationsList) {
-                        for (const node of mutation.addedNodes) {
-                            processNode(node);
-                        }
-                    }
-                });
-
-                observer.observe(captionRegion, config);
-                console.log('✅ Final, robust caption observer injected and running.');
-            }
-            """
-            await page.evaluate(js_code)
-
-            print("Bot is in the meeting. Monitoring for exit conditions...")
-            start_time = time.time()
-            IDLE_TIMEOUT_SECONDS = 300 # 5 minutes
+            try:
+                await page.get_by_role("button", name="Turn on captions").click(timeout=10000)
+                print("📝 Captions turned on.")
+            except TimeoutError:
+                print("Could not find 'Turn on captions' button, or captions were already on.")
             
-            while time.time() - start_time < max_duration:
-                # Check 1: Look for the "No one else is here" banner
+            # --- NEW: GRACE PERIOD FOR CAPTIONS TO APPEAR ---
+            print("Waiting 15 seconds for meeting to stabilize and captions to start...")
+            await asyncio.sleep(15)
+
+            # --- DYNAMIC RECORDING AND CAPTION SCRAPING LOGIC ---
+            print("Bot is now in the meeting. Monitoring participant count and scraping captions...")
+            check_interval_seconds = 5
+            seen_captions = set()
+            while True:
+                await asyncio.sleep(check_interval_seconds)
                 try:
-                    is_alone_banner = page.locator('div:text-matches("No one else is here|Кроме вас, здесь никого нет", "i")')
-                    if await is_alone_banner.is_visible(timeout=1000):
-                        print("👋 'No one else is here' banner detected. Exiting.")
+                    caption_containers = await page.query_selector_all("div.iTTPOb.VbkSUe")
+                    for container in caption_containers:
+                        try:
+                            speaker_element = await container.query_selector("div.zs7s8d.jxF_2d")
+                            speaker_name = await speaker_element.inner_text() if speaker_element else "Unknown"
+                            caption_text_element = await container.query_selector("span[jsname='YSxPC']")
+                            caption_text = await caption_text_element.inner_text() if caption_text_element else ""
+                            caption_key = f"{speaker_name}:{caption_text}"
+                            if caption_text and caption_key not in seen_captions:
+                                timestamp = asyncio.get_event_loop().time()
+                                captions_data.append({"speaker": speaker_name, "caption": caption_text, "timestamp": timestamp})
+                                seen_captions.add(caption_key)
+                                print(f"CAPTURED: [{speaker_name}] {caption_text}")
+                        except Exception as e:
+                            print(f"Could not process a caption block: {e}")
+
+                    participant_button = page.get_by_role("button", name=re.compile(r"Participants|Show everyone"))
+                    participant_count_text = await participant_button.inner_text()
+                    match = re.search(r'\d+', participant_count_text)
+                    if match:
+                        participant_count = int(match.group())
+                        print(f"[{participant_count}] participants in the meeting.")
+                        if participant_count <= 1:
+                            print("Only 1 participant left. Ending the recording.")
+                            break
+                    else:
+                        print("Could not determine participant count from text. Assuming meeting has ended.")
                         break
-                except TimeoutError:
-                    pass # Banner not found, continue
-
-                # Check 2: Exit if no captions have been seen for a while
-                if time.time() - last_caption_time > IDLE_TIMEOUT_SECONDS:
-                    print(f"🕒 No new captions for {IDLE_TIMEOUT_SECONDS} seconds. Assuming meeting has ended. Exiting.")
+                except (TimeoutError, AttributeError):
+                    print("Could not find participant count button. Assuming meeting has ended.")
                     break
-                
-                print(f"Monitoring... (No new captions for {time.time() - last_caption_time:.0f}s)")
-                await asyncio.sleep(15)
-
+                except Exception as e:
+                    print(f"An unexpected error occurred while checking participants or scraping captions: {e}")
+                    break
         except Exception as e:
-            print(f"An error occurred: {e}")
-            await page.screenshot(path="error_screenshot.png")
-            print("📸 Screenshot saved to error_screenshot.png.")
+            print(f"An error occurred during setup or joining: {e}")
+            await page.screenshot(path="debug_screenshot.png")
+            print("📸 Screenshot saved to debug_screenshot.png.")
         finally:
             print("Cleaning up...")
             if recorder and recorder.poll() is None:
-                print("Terminating audio recording...")
                 recorder.terminate()
-                try:
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, recorder.wait, 5)
-                except Exception as e:
-                    print(f"Error while waiting for FFmpeg to terminate: {e}. Killing process.")
-                    recorder.kill()
-
-            if os.path.exists(OUTPUT_FILENAME) and os.path.getsize(OUTPUT_FILENAME) > 0:
-                print(f"✅ Audio recording successful. File saved to {OUTPUT_FILENAME}")
-                transcribe_audio(OUTPUT_FILENAME)
-            else:
-                print("❌ Recording failed or the file was empty.")
-
+                stdout, stderr = recorder.communicate()
+                if os.path.exists(OUTPUT_FILENAME) and os.path.getsize(OUTPUT_FILENAME) > 0:
+                    print(f"✅ Audio recording successful. File saved to {OUTPUT_FILENAME}")
+                    transcribe_audio(OUTPUT_FILENAME)
+                else:
+                    print(f"❌ Recording failed or was empty.\n--- FFmpeg Error Output ---\n{stderr.decode('utf-8', 'ignore')}\n-----------------------------")
+            
             if captions_data:
-                with open(CAPTIONS_FILENAME, 'w', encoding='utf-8') as f:
-                    json.dump(captions_data, f, indent=4, ensure_ascii=False)
-                print(f"✅ Captions with speaker names saved to {CAPTIONS_FILENAME}")
-
+                with open(CAPTIONS_FILENAME, 'w') as f:
+                    json.dump(captions_data, f, indent=4)
+                print(f"✅ Captions saved to {CAPTIONS_FILENAME}")
+            
             await browser.close()
             print("Browser closed.")
 
