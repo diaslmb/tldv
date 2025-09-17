@@ -11,7 +11,6 @@ import requests
 MEETING_URL = sys.argv[1] if len(sys.argv) > 1 else ""
 MAX_MEETING_DURATION_SECONDS = 10800
 OUTPUT_FILENAME = "meeting_audio.wav"
-CAPTIONS_FILENAME = "captions.json"
 TRANSCRIPT_FILENAME = "transcript.txt"
 WHISPERX_URL = "http://localhost:8000/v1/audio/transcriptions"
 
@@ -56,7 +55,6 @@ async def join_and_record_meeting(url: str, max_duration: int):
         context = await browser.new_context(permissions=["microphone", "camera"])
         page = await context.new_page()
         recorder = None
-        captions_data = []
 
         try:
             print(f"Navigating to {url}...")
@@ -79,10 +77,10 @@ async def join_and_record_meeting(url: str, max_duration: int):
             join_button_locator = page.get_by_role("button", name=re.compile("Join now|Ask to join"))
             print("Waiting for the join button...")
             await join_button_locator.wait_for(timeout=15000)
-            
+
             print(f"Starting recording for a maximum of {max_duration / 3600:.1f} hours...")
             recorder = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
+
             print("Clicking the join button...")
             await join_button_locator.click(timeout=15000)
             print("Successfully joined or requested to join.")
@@ -92,62 +90,58 @@ async def join_and_record_meeting(url: str, max_duration: int):
                 print("✅ Closed the initial pop-up window.")
             except TimeoutError:
                 print("Initial pop-up not found, continuing...")
-
-            try:
-                await page.get_by_role("button", name="Turn on captions").click(timeout=10000)
-                print("📝 Captions turned on.")
-            except TimeoutError:
-                print("Could not find 'Turn on captions' button, or captions were already on.")
             
-            # --- NEW: GRACE PERIOD FOR CAPTIONS TO APPEAR ---
-            print("Waiting 15 seconds for meeting to stabilize and captions to start...")
-            await asyncio.sleep(15)
+            # --- CAPTIONING LOGIC HAS BEEN REMOVED ---
 
-            # --- DYNAMIC RECORDING AND CAPTION SCRAPING LOGIC ---
-            print("Bot is now in the meeting. Monitoring participant count and scraping captions...")
-            check_interval_seconds = 5
-            seen_captions = set()
+            # --- DYNAMIC RECORDING AND PARTICIPANT COUNTING LOGIC ---
+            print("Bot is now in the meeting. Monitoring participant count...")
+            check_interval_seconds = 10 # Increased interval slightly
             while True:
                 await asyncio.sleep(check_interval_seconds)
                 try:
-                    caption_containers = await page.query_selector_all("div.iTTPOb.VbkSUe")
-                    for container in caption_containers:
-                        try:
-                            speaker_element = await container.query_selector("div.zs7s8d.jxF_2d")
-                            speaker_name = await speaker_element.inner_text() if speaker_element else "Unknown"
-                            caption_text_element = await container.query_selector("span[jsname='YSxPC']")
-                            caption_text = await caption_text_element.inner_text() if caption_text_element else ""
-                            caption_key = f"{speaker_name}:{caption_text}"
-                            if caption_text and caption_key not in seen_captions:
-                                timestamp = asyncio.get_event_loop().time()
-                                captions_data.append({"speaker": speaker_name, "caption": caption_text, "timestamp": timestamp})
-                                seen_captions.add(caption_key)
-                                print(f"CAPTURED: [{speaker_name}] {caption_text}")
-                        except Exception as e:
-                            print(f"Could not process a caption block: {e}")
+                    participant_button_locator = page.get_by_role("button", name=re.compile(r"Participants|Show everyone"))
+                    
+                    # --- DEBUGGING STARTS HERE ---
+                    # 1. Let's see if the button is even visible.
+                    if await participant_button_locator.is_visible():
+                        print("✅ Participant button is visible.")
+                        participant_count_text = await participant_button_locator.inner_text()
+                        print(f"DEBUG: Raw button text: '{participant_count_text}'") # Print the raw text
+                    else:
+                        print("❌ Participant button is NOT visible.")
+                        await page.screenshot(path="debug_participant_button_not_visible.png")
+                        print("📸 Screenshot saved to debug_participant_button_not_visible.png")
+                        break # Exit if we can't find the button
 
-                    participant_button = page.get_by_role("button", name=re.compile(r"Participants|Show everyone"))
-                    participant_count_text = await participant_button.inner_text()
+                    # 2. Let's check the extracted text and the regex match.
                     match = re.search(r'\d+', participant_count_text)
                     if match:
                         participant_count = int(match.group())
-                        print(f"[{participant_count}] participants in the meeting.")
+                        print(f"✅ Successfully parsed participant count: [{participant_count}]")
                         if participant_count <= 1:
                             print("Only 1 participant left. Ending the recording.")
                             break
                     else:
-                        print("Could not determine participant count from text. Assuming meeting has ended.")
+                        print("❌ Could not parse participant count from text.")
+                        await page.screenshot(path="debug_participant_parsing_failed.png")
+                        print("📸 Screenshot saved to debug_participant_parsing_failed.png")
                         break
-                except (TimeoutError, AttributeError):
+                    # --- DEBUGGING ENDS HERE ---
+
+                except TimeoutError:
                     print("Could not find participant count button. Assuming meeting has ended.")
+                    await page.screenshot(path="debug_participant_timeout.png")
+                    print("📸 Screenshot saved to debug_participant_timeout.png.")
                     break
                 except Exception as e:
-                    print(f"An unexpected error occurred while checking participants or scraping captions: {e}")
+                    print(f"An unexpected error occurred while checking participants: {e}")
+                    await page.screenshot(path="debug_participant_unexpected_error.png")
+                    print("📸 Screenshot saved to debug_participant_unexpected_error.png.")
                     break
         except Exception as e:
             print(f"An error occurred during setup or joining: {e}")
-            await page.screenshot(path="debug_screenshot.png")
-            print("📸 Screenshot saved to debug_screenshot.png.")
+            await page.screenshot(path="debug_setup_error.png")
+            print("📸 Screenshot saved to debug_setup_error.png.")
         finally:
             print("Cleaning up...")
             if recorder and recorder.poll() is None:
@@ -158,11 +152,6 @@ async def join_and_record_meeting(url: str, max_duration: int):
                     transcribe_audio(OUTPUT_FILENAME)
                 else:
                     print(f"❌ Recording failed or was empty.\n--- FFmpeg Error Output ---\n{stderr.decode('utf-8', 'ignore')}\n-----------------------------")
-            
-            if captions_data:
-                with open(CAPTIONS_FILENAME, 'w') as f:
-                    json.dump(captions_data, f, indent=4)
-                print(f"✅ Captions saved to {CAPTIONS_FILENAME}")
             
             await browser.close()
             print("Browser closed.")
