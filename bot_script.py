@@ -45,7 +45,8 @@ def transcribe_audio(audio_path):
 
 async def join_and_record_meeting(url: str, max_duration: int):
     ffmpeg_command = get_ffmpeg_command(sys.platform, max_duration)
-    if not ffm_command:
+    # --- THIS LINE HAS BEEN CORRECTED ---
+    if not ffmpeg_command:
         print(f"Unsupported OS: {sys.platform}. Could not determine ffmpeg command.")
         return
 
@@ -96,7 +97,6 @@ async def join_and_record_meeting(url: str, max_duration: int):
             while True:
                 await asyncio.sleep(check_interval_seconds)
                 try:
-                    # --- CHANGE 1: Using a more robust selector for the participant button ---
                     participant_button_locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"]')
                     
                     await participant_button_locator.wait_for(state="visible", timeout=5000)
@@ -141,13 +141,12 @@ async def join_and_record_meeting(url: str, max_duration: int):
                 else:
                     print(f"❌ Recording failed or was empty.\n--- FFmpeg Error Output ---\n{stderr.decode('utf-8', 'ignore')}\n-----------------------------")
             
-            # --- CHANGE 2: Gracefully leave the call before closing the browser ---
             try:
                 print("Attempting to hang up...")
                 hang_up_button = page.get_by_role("button", name="Leave call")
                 await hang_up_button.click(timeout=5000)
                 print("✅ Clicked the 'Leave call' button.")
-                await asyncio.sleep(3) # Wait a moment for the action to register
+                await asyncio.sleep(3)
             except Exception as e:
                 print(f"Could not click hang up button, may have already left: {e}")
 
