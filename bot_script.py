@@ -91,7 +91,6 @@ async def join_and_record_meeting(url: str, max_duration: int):
             except TimeoutError:
                 print("Initial pop-up not found, continuing...")
 
-            # --- NEW: Added a delay to allow the main meeting UI to stabilize ---
             print("Waiting for 10 seconds for the meeting UI to stabilize...")
             await asyncio.sleep(10)
 
@@ -100,14 +99,20 @@ async def join_and_record_meeting(url: str, max_duration: int):
             while True:
                 await asyncio.sleep(check_interval_seconds)
                 try:
-                    participant_button_locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"]')
-                    
-                    await participant_button_locator.wait_for(state="visible", timeout=5000)
-                    
-                    participant_count_text = await participant_button_locator.get_attribute("aria-label")
-                    print(f"DEBUG: Raw aria-label: '{participant_count_text}'")
+                    # --- CHANGE 1: Using a much more robust, multi-attribute selector ---
+                    participant_button_locator = page.locator(
+                        'button[aria-label*="Show everyone"], button[aria-label*="Participants"], button[aria-label*="People"],'
+                        'button[data-tooltip*="Show everyone"], button[data-tooltip*="Participants"], button[data-tooltip*="People"]'
+                    ).first
 
-                    match = re.search(r'\d+', participant_count_text)
+                    await participant_button_locator.wait_for(state="visible", timeout=5000)
+
+                    # Try to get aria-label first, fall back to data-tooltip
+                    count_text = await participant_button_locator.get_attribute("aria-label") or await participant_button_locator.get_attribute("data-tooltip")
+
+                    print(f"DEBUG: Raw attribute text: '{count_text}'")
+
+                    match = re.search(r'\d+', count_text)
                     if match:
                         participant_count = int(match.group())
                         print(f"✅ Successfully parsed participant count: [{participant_count}]")
@@ -115,14 +120,24 @@ async def join_and_record_meeting(url: str, max_duration: int):
                             print("Only 1 participant left. Ending the recording.")
                             break
                     else:
-                        print(f"❌ Could not parse participant count from text: '{participant_count_text}'")
+                        print(f"❌ Could not parse participant count from text: '{count_text}'")
                         break
 
                 except TimeoutError:
                     print("Could not find participant count button. Assuming meeting has ended.")
                     await page.screenshot(path="debug_participant_timeout.png")
                     print("📸 Screenshot saved to debug_participant_timeout.png.")
-                    break
+
+                    # --- CHANGE 2: Save the page HTML for definitive debugging ---
+                    try:
+                        html_content = await page.content()
+                        with open("debug_page_content.html", "w", encoding="utf-8") as f:
+                            f.write(html_content)
+                        print("📄 Saved page HTML to debug_page_content.html for analysis.")
+                    except Exception as html_error:
+                        print(f"Could not save page HTML: {html_error}")
+                    
+                    break # Exit the loop after failure
                 except Exception as e:
                     print(f"An unexpected error occurred while checking participants: {e}")
                     await page.screenshot(path="debug_participant_unexpected_error.png")
@@ -143,7 +158,7 @@ async def join_and_record_meeting(url: str, max_duration: int):
                     transcribe_audio(OUTPUT_FILENAME)
                 else:
                     print(f"❌ Recording failed or was empty.\n--- FFmpeg Error Output ---\n{stderr.decode('utf-8', 'ignore')}\n-----------------------------")
-            
+
             try:
                 print("Attempting to hang up...")
                 hang_up_button = page.get_by_role("button", name="Leave call")
