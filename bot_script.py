@@ -45,7 +45,7 @@ def transcribe_audio(audio_path):
 
 async def join_and_record_meeting(url: str, max_duration: int):
     ffmpeg_command = get_ffmpeg_command(sys.platform, max_duration)
-    if not ffmpeg_command:
+    if not ffm_command:
         print(f"Unsupported OS: {sys.platform}. Could not determine ffmpeg command.")
         return
 
@@ -90,30 +90,20 @@ async def join_and_record_meeting(url: str, max_duration: int):
                 print("✅ Closed the initial pop-up window.")
             except TimeoutError:
                 print("Initial pop-up not found, continuing...")
-            
-            # --- CAPTIONING LOGIC HAS BEEN REMOVED ---
 
-            # --- DYNAMIC RECORDING AND PARTICIPANT COUNTING LOGIC ---
             print("Bot is now in the meeting. Monitoring participant count...")
-            check_interval_seconds = 10 # Increased interval slightly
+            check_interval_seconds = 10
             while True:
                 await asyncio.sleep(check_interval_seconds)
                 try:
-                    participant_button_locator = page.get_by_role("button", name=re.compile(r"Participants|Show everyone"))
+                    # --- CHANGE 1: Using a more robust selector for the participant button ---
+                    participant_button_locator = page.locator('button[aria-label*="Show everyone"], button[aria-label*="Participants"]')
                     
-                    # --- DEBUGGING STARTS HERE ---
-                    # 1. Let's see if the button is even visible.
-                    if await participant_button_locator.is_visible():
-                        print("✅ Participant button is visible.")
-                        participant_count_text = await participant_button_locator.inner_text()
-                        print(f"DEBUG: Raw button text: '{participant_count_text}'") # Print the raw text
-                    else:
-                        print("❌ Participant button is NOT visible.")
-                        await page.screenshot(path="debug_participant_button_not_visible.png")
-                        print("📸 Screenshot saved to debug_participant_button_not_visible.png")
-                        break # Exit if we can't find the button
+                    await participant_button_locator.wait_for(state="visible", timeout=5000)
+                    
+                    participant_count_text = await participant_button_locator.get_attribute("aria-label")
+                    print(f"DEBUG: Raw aria-label: '{participant_count_text}'")
 
-                    # 2. Let's check the extracted text and the regex match.
                     match = re.search(r'\d+', participant_count_text)
                     if match:
                         participant_count = int(match.group())
@@ -122,11 +112,8 @@ async def join_and_record_meeting(url: str, max_duration: int):
                             print("Only 1 participant left. Ending the recording.")
                             break
                     else:
-                        print("❌ Could not parse participant count from text.")
-                        await page.screenshot(path="debug_participant_parsing_failed.png")
-                        print("📸 Screenshot saved to debug_participant_parsing_failed.png")
+                        print(f"❌ Could not parse participant count from text: '{participant_count_text}'")
                         break
-                    # --- DEBUGGING ENDS HERE ---
 
                 except TimeoutError:
                     print("Could not find participant count button. Assuming meeting has ended.")
@@ -145,6 +132,7 @@ async def join_and_record_meeting(url: str, max_duration: int):
         finally:
             print("Cleaning up...")
             if recorder and recorder.poll() is None:
+                print("Stopping the recording...")
                 recorder.terminate()
                 stdout, stderr = recorder.communicate()
                 if os.path.exists(OUTPUT_FILENAME) and os.path.getsize(OUTPUT_FILENAME) > 0:
@@ -153,6 +141,16 @@ async def join_and_record_meeting(url: str, max_duration: int):
                 else:
                     print(f"❌ Recording failed or was empty.\n--- FFmpeg Error Output ---\n{stderr.decode('utf-8', 'ignore')}\n-----------------------------")
             
+            # --- CHANGE 2: Gracefully leave the call before closing the browser ---
+            try:
+                print("Attempting to hang up...")
+                hang_up_button = page.get_by_role("button", name="Leave call")
+                await hang_up_button.click(timeout=5000)
+                print("✅ Clicked the 'Leave call' button.")
+                await asyncio.sleep(3) # Wait a moment for the action to register
+            except Exception as e:
+                print(f"Could not click hang up button, may have already left: {e}")
+
             await browser.close()
             print("Browser closed.")
 
