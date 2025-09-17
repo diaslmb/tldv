@@ -45,7 +45,6 @@ def transcribe_audio(audio_path):
 
 async def join_and_record_meeting(url: str, max_duration: int):
     ffmpeg_command = get_ffmpeg_command(sys.platform, max_duration)
-    # --- THIS LINE HAS BEEN CORRECTED ---
     if not ffmpeg_command:
         print(f"Unsupported OS: {sys.platform}. Could not determine ffmpeg command.")
         return
@@ -91,6 +90,10 @@ async def join_and_record_meeting(url: str, max_duration: int):
                 print("✅ Closed the initial pop-up window.")
             except TimeoutError:
                 print("Initial pop-up not found, continuing...")
+
+            # --- NEW: Added a delay to allow the main meeting UI to stabilize ---
+            print("Waiting for 10 seconds for the meeting UI to stabilize...")
+            await asyncio.sleep(10)
 
             print("Bot is now in the meeting. Monitoring participant count...")
             check_interval_seconds = 10
